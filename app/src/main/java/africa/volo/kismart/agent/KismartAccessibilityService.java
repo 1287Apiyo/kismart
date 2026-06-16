@@ -127,6 +127,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         // Don't process if we're already updating the blocker
         if (isUpdatingBlocker) return;
 
+        // Full lock mode takes precedence - never show overlay, just enforce full lock
         if (DeviceControls.isFullLockPolicy(policy)) {
             hideBlocker();
             if (!isKismartLockScreen()) {
@@ -135,69 +136,42 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        boolean shouldShow = false;
-        boolean shouldHide = false;
-        boolean isDangerous = false;
-
-        if (blockerVisible && holdingDangerousSettings) {
-            if (shouldKeepDangerousBlocker(policy, packageName)) {
-                return; // Keep showing
+        // Payment-only mode: ONLY show overlay for dangerous surfaces
+        // Otherwise, allow all apps to function normally
+        if (policy.paymentOnlyActive) {
+            // Check if we're on a dangerous settings/removal screen
+            if (isFinancedDeviceControlSurface(packageName)) {
+                // This is a factory reset / accessibility / device admin / KISMART removal screen
+                // Show the protection overlay
+                showBlocker(true);
+                return;
             }
-            shouldHide = true;
-        } else if (blockerVisible && isProtectionOverlayScreen()) {
-            if (policy.paymentOnlyActive && isOverlayEventPackage(packageName)) {
-                return; // Keep showing
-            }
-        }
-
-        if (isFinancedPolicy(policy) && isFinancedDeviceControlSurface(packageName)) {
-            shouldShow = true;
-            isDangerous = true;
-        } else if (policy.paymentOnlyActive) {
-            if (getPackageName().equals(packageName)) {
-                if (blockerVisible && isProtectionOverlayScreen()) {
-                    return; // Keep showing
+            
+            // If KISMART protection overlay is currently showing
+            if (blockerVisible && isProtectionOverlayScreen()) {
+                // Keep it showing only if user is trying to interact with system UI
+                if (isOverlayEventPackage(packageName) && System.currentTimeMillis() < allowKismartOpenUntil) {
+                    return; // Keep overlay visible
                 }
-                shouldHide = true;
-            } else if (System.currentTimeMillis() < allowKismartOpenUntil && isOverlayEventPackage(packageName)) {
-                shouldHide = true;
-            } else if (isAllowedSystemPackage(packageName)) {
-                // Don't change anything
-            } else {
-                shouldShow = true;
+                // Otherwise hide it
+                hideBlocker();
+                return;
             }
-        } else {
-            shouldHide = true;
+            
+            // For all other apps in payment-only mode: NO OVERLAY
+            // Let the user use their apps normally
+            hideBlocker();
+            return;
         }
 
-        // Apply the determined state
-        if (shouldShow) {
-            showBlocker(isDangerous);
-        } else if (shouldHide) {
-            hideBlocker();
-        }
+        // Non-payment-only mode: no restrictions
+        hideBlocker();
     }
 
     private boolean isFinancedDeviceControlSurface(String packageName) {
+        // ONLY check for dangerous screens - don't show overlay for normal apps
         if (isDangerousSettingsScreen(packageName)) return true;
         return isDangerousRemovalSurface();
-    }
-
-    private boolean shouldKeepDangerousBlocker(Policy policy, String packageName) {
-        if (!isFinancedPolicy(policy) && !policy.paymentOnlyActive) return false;
-        if (isLauncherPackage(packageName)) return false;
-        if (getPackageName().equals(packageName)) return false;
-        if (isSettingsLikePackage(packageName)) return true;
-        return isOverlayEventPackage(packageName);
-    }
-
-    private boolean isLauncherPackage(String packageName) {
-        String value = packageName == null ? "" : packageName.toLowerCase();
-        return value.contains("launcher")
-                || value.contains(".home")
-                || value.equals("com.miui.home")
-                || value.equals("com.android.launcher")
-                || value.equals("com.google.android.apps.nexuslauncher");
     }
 
     private boolean isAllowedSystemPackage(String packageName) {
