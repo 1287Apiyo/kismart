@@ -1,0 +1,16 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'africa.volo.kismart.agent'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'africa.volo.kismart.agent'
+        minSdk 23
+        targetSdk 35
+        versionCode 32
+        versionName '1.0.31'
+    }
+}

@@ -1,0 +1,11 @@
+# Default ignored files
+/shelf/
+/workspace.xml
+.gradle/
+.gradle-local/
+build/
+app/build/
+.idea/caches/
+local.properties
+*.apk
+dist/
