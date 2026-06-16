@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
@@ -16,14 +17,15 @@ import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
-import android.util.Log;
 
 public class KismartAccessibilityService extends AccessibilityService {
-    private static final String TAG = "KismartA11y";
-    private static final boolean DEBUG_BUILD = true;
     private static final long WATCHDOG_INTERVAL_MS = 450L;
     private static final long EMERGENCY_ALLOW_MS = 30000L;
     private static final long KISMART_OPEN_ALLOW_MS = 5000L;
+    // Increased debounce time to prevent flickering
+    private static final long MIN_BLOCKER_TOGGLE_MS = 800L;
+    // Cooldown period after hiding before showing again
+    private static final long SHOW_COOLDOWN_MS = 400L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable watchdog = new Runnable() {
@@ -40,10 +42,12 @@ public class KismartAccessibilityService extends AccessibilityService {
     private boolean holdingDangerousSettings;
     private long emergencyAllowedUntil;
     private long allowKismartOpenUntil;
-    private static final long MIN_BLOCKER_TOGGLE_MS = 600L;
     private long lastBlockerToggle = 0L;
+    private long lastHideTime = 0L;
     private Runnable pendingShow;
     private Runnable pendingHide;
+    // Flag to prevent concurrent operations
+    private boolean isUpdatingBlocker = false;
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
@@ -77,8 +81,22 @@ public class KismartAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         handler.removeCallbacks(watchdog);
-        hideBlocker();
+        // Cancel all pending operations
+        cancelPendingOperations();
+        hideBlockerImmediate();
         super.onDestroy();
+    }
+
+    private void cancelPendingOperations() {
+        if (pendingShow != null) {
+            handler.removeCallbacks(pendingShow);
+            pendingShow = null;
+        }
+        if (pendingHide != null) {
+            handler.removeCallbacks(pendingHide);
+            pendingHide = null;
+        }
+        isUpdatingBlocker = false;
     }
 
     private void configureService() {
@@ -89,7 +107,7 @@ public class KismartAccessibilityService extends AccessibilityService {
                 | AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
                 | AccessibilityEvent.TYPE_VIEW_CLICKED;
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC;
-        info.notificationTimeout = 25L;
+        info.notificationTimeout = 50L; // Increased to reduce event frequency
         info.flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
                 | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
         setServiceInfo(info);
@@ -106,6 +124,9 @@ public class KismartAccessibilityService extends AccessibilityService {
         if (packageName.isEmpty()) packageName = activePackageName();
         if (packageName.isEmpty()) return;
 
+        // Don't process if we're already updating the blocker
+        if (isUpdatingBlocker) return;
+
         if (DeviceControls.isFullLockPolicy(policy)) {
             hideBlocker();
             if (!isKismartLockScreen()) {
@@ -114,56 +135,69 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        if (DEBUG_BUILD) {
-            try {
-                AccessibilityNodeInfo root = getRootInActiveWindow();
-                String screenText = root == null ? "<no-root>" : collectScreenText(root).toLowerCase();
-                Log.d(TAG, "enforceCurrentWindow: package=" + packageName + " policy=" + (policy==null?"null":policy.status) + " paymentOnly=" + policy.paymentOnlyActive + " holdingDangerous=" + holdingDangerousSettings + " blockerVisible=" + blockerVisible + " screenTextPreview=" + (screenText.length()>250 ? screenText.substring(0,250)+"..." : screenText));
-                if (root != null) root.recycle();
-            } catch (Throwable t) {
-                Log.d(TAG, "enforceCurrentWindow: failed to collect screen text: " + t);
+        boolean shouldShow = false;
+        boolean shouldHide = false;
+        boolean isDangerous = false;
+
+        if (blockerVisible && holdingDangerousSettings) {
+            if (shouldKeepDangerousBlocker(policy, packageName)) {
+                return; // Keep showing
+            }
+            shouldHide = true;
+        } else if (blockerVisible && isProtectionOverlayScreen()) {
+            if (policy.paymentOnlyActive && isOverlayEventPackage(packageName)) {
+                return; // Keep showing
             }
         }
 
-        // Only show the protection overlay when the account is in "limited" (payment-only) mode.
-        // This prevents the blocker appearing for active accounts and avoids flicker.
-        if (policy.paymentOnlyActive) {
-            // If the user is on a dangerous settings surface (factory reset / accessibility / uninstall)
-            // block it explicitly and mark as holding dangerous settings so the UI can hint appropriately.
-            if (isFinancedDeviceControlSurface(packageName)) {
-                if (DEBUG_BUILD) Log.d(TAG, "Detected dangerous device control surface in package: " + packageName);
-                showBlocker(true);
-                return;
-            }
+        if (isFinancedPolicy(policy) && isFinancedDeviceControlSurface(packageName)) {
+            shouldShow = true;
+            isDangerous = true;
+        } else if (policy.paymentOnlyActive) {
             if (getPackageName().equals(packageName)) {
-                if (blockerVisible && isProtectionOverlayScreen()) return;
-                hideBlocker();
-                return;
+                if (blockerVisible && isProtectionOverlayScreen()) {
+                    return; // Keep showing
+                }
+                shouldHide = true;
+            } else if (System.currentTimeMillis() < allowKismartOpenUntil && isOverlayEventPackage(packageName)) {
+                shouldHide = true;
+            } else if (isAllowedSystemPackage(packageName)) {
+                // Don't change anything
+            } else {
+                shouldShow = true;
             }
-            if (System.currentTimeMillis() < allowKismartOpenUntil && isOverlayEventPackage(packageName)) {
-                hideBlocker();
-                return;
-            }
-            if (isAllowedSystemPackage(packageName)) return;
-            showBlocker();
-            return;
+        } else {
+            shouldHide = true;
         }
 
-        hideBlocker();
+        // Apply the determined state
+        if (shouldShow) {
+            showBlocker(isDangerous);
+        } else if (shouldHide) {
+            hideBlocker();
+        }
     }
 
     private boolean isFinancedDeviceControlSurface(String packageName) {
-        // Detect dangerous settings screen with improved text collection
-        if (isDangerousSettingsScreen(packageName)) {
-            if (DEBUG_BUILD) Log.d(TAG, "isFinancedDeviceControlSurface: detected dangerous settings screen");
-            return true;
-        }
-        // Detect dangerous removal surface (app info, uninstall pages)
-        if (isDangerousRemovalSurface()) {
-            if (DEBUG_BUILD) Log.d(TAG, "isFinancedDeviceControlSurface: detected dangerous removal surface");
-            return true;
-        }
-        return false;
+        if (isDangerousSettingsScreen(packageName)) return true;
+        return isDangerousRemovalSurface();
+    }
+
+    private boolean shouldKeepDangerousBlocker(Policy policy, String packageName) {
+        if (!isFinancedPolicy(policy) && !policy.paymentOnlyActive) return false;
+        if (isLauncherPackage(packageName)) return false;
+        if (getPackageName().equals(packageName)) return false;
+        if (isSettingsLikePackage(packageName)) return true;
+        return isOverlayEventPackage(packageName);
+    }
+
+    private boolean isLauncherPackage(String packageName) {
+        String value = packageName == null ? "" : packageName.toLowerCase();
+        return value.contains("launcher")
+                || value.contains(".home")
+                || value.equals("com.miui.home")
+                || value.equals("com.android.launcher")
+                || value.equals("com.google.android.apps.nexuslauncher");
     }
 
     private boolean isAllowedSystemPackage(String packageName) {
@@ -188,6 +222,12 @@ public class KismartAccessibilityService extends AccessibilityService {
                 || "com.android.systemui".equals(value);
     }
 
+    private boolean isFinancedPolicy(Policy policy) {
+        if (policy == null) return false;
+        if (policy.contractId == null || policy.contractId.trim().isEmpty()) return false;
+        return !"Completed".equalsIgnoreCase(policy.status);
+    }
+
     private boolean isSettingsLikePackage(String packageName) {
         String value = packageName == null ? "" : packageName.toLowerCase();
         return "com.android.settings".equals(value)
@@ -205,16 +245,10 @@ public class KismartAccessibilityService extends AccessibilityService {
             root = getRootInActiveWindow();
             if (root == null) return false;
             String screenText = collectScreenText(root).toLowerCase();
-            boolean isFactory = isFactoryResetScreen(screenText);
-            boolean isAccessibility = isAccessibilityControlScreen(screenText);
-            boolean isAdmin = isDeviceAdminControlScreen(screenText);
-            boolean isKismartRemoval = isKismartRemovalScreen(screenText);
-            
-            if (DEBUG_BUILD) {
-                Log.d(TAG, "isDangerousSettingsScreen: factory=" + isFactory + " accessibility=" + isAccessibility + " admin=" + isAdmin + " kismartRemoval=" + isKismartRemoval);
-            }
-            
-            return isFactory || isAccessibility || isAdmin || isKismartRemoval;
+            return isFactoryResetScreen(screenText)
+                    || isAccessibilityControlScreen(screenText)
+                    || isDeviceAdminControlScreen(screenText)
+                    || isKismartRemovalScreen(screenText);
         } catch (RuntimeException ignored) {
             return false;
         } finally {
@@ -228,15 +262,7 @@ public class KismartAccessibilityService extends AccessibilityService {
             root = getRootInActiveWindow();
             if (root == null) return false;
             String screenText = collectScreenText(root).toLowerCase();
-            boolean isFactory = isFactoryResetScreen(screenText);
-            boolean isAccessibility = isAccessibilityControlScreen(screenText);
-            boolean isKismartRemoval = isKismartRemovalScreen(screenText);
-            
-            if (DEBUG_BUILD && (isFactory || isAccessibility || isKismartRemoval)) {
-                Log.d(TAG, "isDangerousRemovalSurface: factory=" + isFactory + " accessibility=" + isAccessibility + " kismartRemoval=" + isKismartRemoval);
-            }
-            
-            return isFactory || isAccessibility || isKismartRemoval;
+            return isKismartRemovalScreen(screenText);
         } catch (RuntimeException ignored) {
             return false;
         } finally {
@@ -245,8 +271,7 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private boolean isFactoryResetScreen(String screenText) {
-        if (screenText == null) return false;
-        boolean result = containsAny(screenText,
+        return containsAny(screenText,
                 "factory reset",
                 "factory data reset",
                 "reset options",
@@ -260,19 +285,11 @@ public class KismartAccessibilityService extends AccessibilityService {
                 "wipe data",
                 "format data",
                 "restore factory settings",
-                "clear all data",
-                "recovery",
-                "erasing",
-                "reset to factory defaults",
-                "boot loader");
-        if (result && DEBUG_BUILD) {
-            Log.d(TAG, "Factory reset screen detected: " + screenText.substring(0, Math.min(200, screenText.length())));
-        }
-        return result;
+                "clear all data");
     }
 
     private boolean isAccessibilityControlScreen(String screenText) {
-        if (screenText == null || !screenText.contains("accessibility")) return false;
+        if (!screenText.contains("accessibility")) return false;
         if (screenText.contains("kismart")) return true;
         return containsAny(screenText,
                 "downloaded apps",
@@ -288,7 +305,6 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private boolean isDeviceAdminControlScreen(String screenText) {
-        if (screenText == null) return false;
         return containsAny(screenText,
                 "device admin apps",
                 "device administrator",
@@ -299,7 +315,7 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private boolean isKismartRemovalScreen(String screenText) {
-        if (screenText == null || !screenText.contains("kismart")) return false;
+        if (!screenText.contains("kismart")) return false;
         return containsAny(screenText,
                 "uninstall",
                 "uninstall app",
@@ -341,8 +357,7 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private void appendNodeText(AccessibilityNodeInfo node, StringBuilder builder, int depth) {
-        // Increased depth limit to catch deeply nested factory reset options
-        if (node == null || depth > 15 || builder.length() > 20000) return;
+        if (node == null || depth > 8 || builder.length() > 12000) return;
         appendText(builder, node.getText());
         appendText(builder, node.getContentDescription());
         appendText(builder, node.getViewIdResourceName());
@@ -413,88 +428,146 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private void showBlocker(boolean dangerousSettings) {
-        holdingDangerousSettings = dangerousSettings;
         long now = System.currentTimeMillis();
+
+        // Prevent showing if recently hidden (cooldown)
+        if (now - lastHideTime < SHOW_COOLDOWN_MS) {
+            return;
+        }
+
+        // If already visible with same settings, don't update
+        if (blockerVisible && holdingDangerousSettings == dangerousSettings) {
+            return;
+        }
+
+        // If already visible but with different settings, hide first then show
+        if (blockerVisible) {
+            hideBlockerImmediate();
+        }
+
         long since = now - lastBlockerToggle;
-        if (blockerVisible) return;
         if (since < MIN_BLOCKER_TOGGLE_MS) {
-            if (pendingShow != null) handler.removeCallbacks(pendingShow);
-            pendingShow = () -> {
-                lastBlockerToggle = System.currentTimeMillis();
-                actuallyShowBlocker(dangerousSettings);
-                pendingShow = null;
+            // Cancel any existing pending show
+            if (pendingShow != null) {
+                handler.removeCallbacks(pendingShow);
+            }
+
+            pendingShow = new Runnable() {
+                @Override
+                public void run() {
+                    isUpdatingBlocker = false;
+                    lastBlockerToggle = System.currentTimeMillis();
+                    actuallyShowBlocker(dangerousSettings);
+                    pendingShow = null;
+                }
             };
+            isUpdatingBlocker = true;
             handler.postDelayed(pendingShow, MIN_BLOCKER_TOGGLE_MS - since);
             return;
         }
+
         lastBlockerToggle = now;
         actuallyShowBlocker(dangerousSettings);
     }
 
     private void actuallyShowBlocker(boolean dangerousSettings) {
         if (windowManager == null) windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
-        if (windowManager == null) return;
-        if (blocker == null) blocker = buildBlocker();
+        if (windowManager == null) {
+            isUpdatingBlocker = false;
+            return;
+        }
 
-        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                android.graphics.PixelFormat.TRANSLUCENT
-        );
-        params.gravity = Gravity.TOP | Gravity.START;
         try {
-            windowManager.addView(blocker, params);
-            blockerVisible = true;
-            if (DEBUG_BUILD) {
-                Log.d(TAG, "actuallyShowBlocker: added view; dangerousSettings=" + dangerousSettings);
+            // Remove existing blocker if any
+            if (blocker != null && blocker.isAttachedToWindow()) {
                 try {
-                    AccessibilityNodeInfo root = getRootInActiveWindow();
-                    if (root != null) {
-                        String text = collectScreenText(root).toLowerCase();
-                        Log.d(TAG, "actuallyShowBlocker: screenText(len=" + text.length() + ") preview=" + (text.length()>500?text.substring(0,500)+"...":text));
-                        root.recycle();
-                    }
-                } catch (Throwable t) {
-                    Log.d(TAG, "actuallyShowBlocker: failed to collect screen text: " + t);
+                    windowManager.removeView(blocker);
+                } catch (Exception e) {
+                    // Ignore if not attached
                 }
             }
-        } catch (IllegalStateException ignored) {
+
+            // Create fresh blocker view
+            blocker = buildBlocker();
+            holdingDangerousSettings = dangerousSettings;
+
+            WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN |
+                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
+                            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                    PixelFormat.TRANSLUCENT
+            );
+            params.gravity = Gravity.TOP | Gravity.START;
+
+            windowManager.addView(blocker, params);
             blockerVisible = true;
-            if (DEBUG_BUILD) Log.d(TAG, "actuallyShowBlocker: IllegalStateException while adding view; assuming visible");
+            isUpdatingBlocker = false;
         } catch (Exception e) {
             blockerVisible = false;
             holdingDangerousSettings = false;
-            if (DEBUG_BUILD) Log.d(TAG, "actuallyShowBlocker: failed to add view: " + e);
+            isUpdatingBlocker = false;
         }
     }
 
     private void hideBlocker() {
-        if (!blockerVisible || blocker == null || windowManager == null) return;
+        if (!blockerVisible) return;
+
         long now = System.currentTimeMillis();
         long since = now - lastBlockerToggle;
+
         if (since < MIN_BLOCKER_TOGGLE_MS) {
-            if (pendingHide != null) handler.removeCallbacks(pendingHide);
-            pendingHide = () -> {
-                lastBlockerToggle = System.currentTimeMillis();
-                actuallyHideBlocker();
-                pendingHide = null;
+            // Cancel any existing pending hide
+            if (pendingHide != null) {
+                handler.removeCallbacks(pendingHide);
+            }
+
+            pendingHide = new Runnable() {
+                @Override
+                public void run() {
+                    isUpdatingBlocker = false;
+                    lastBlockerToggle = System.currentTimeMillis();
+                    actuallyHideBlocker();
+                    pendingHide = null;
+                }
             };
+            isUpdatingBlocker = true;
             handler.postDelayed(pendingHide, MIN_BLOCKER_TOGGLE_MS - since);
             return;
         }
+
         lastBlockerToggle = now;
         actuallyHideBlocker();
     }
 
+    private void hideBlockerImmediate() {
+        cancelPendingOperations();
+        if (blocker != null && blocker.isAttachedToWindow() && windowManager != null) {
+            try {
+                windowManager.removeView(blocker);
+            } catch (Exception e) {
+                // Ignore errors
+            }
+        }
+        blockerVisible = false;
+        holdingDangerousSettings = false;
+        lastHideTime = System.currentTimeMillis();
+    }
+
     private void actuallyHideBlocker() {
         try {
-            windowManager.removeView(blocker);
-        } catch (Exception ignored) {
+            if (blocker != null && blocker.isAttachedToWindow() && windowManager != null) {
+                windowManager.removeView(blocker);
+            }
+        } catch (Exception e) {
+            // Ignore errors
         } finally {
             blockerVisible = false;
             holdingDangerousSettings = false;
+            lastHideTime = System.currentTimeMillis();
+            isUpdatingBlocker = false;
         }
     }
 
