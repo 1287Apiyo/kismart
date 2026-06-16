@@ -20,8 +20,6 @@ import android.util.Log;
 
 public class KismartAccessibilityService extends AccessibilityService {
     private static final String TAG = "KismartA11y";
-    // Enable verbose a11y debug logging when DEBUG_BUILD is true
-    // Set to true to capture detailed logs for debugging; set to false to reduce noise.
     private static final boolean DEBUG_BUILD = true;
     private static final long WATCHDOG_INTERVAL_MS = 450L;
     private static final long EMERGENCY_ALLOW_MS = 30000L;
@@ -42,7 +40,6 @@ public class KismartAccessibilityService extends AccessibilityService {
     private boolean holdingDangerousSettings;
     private long emergencyAllowedUntil;
     private long allowKismartOpenUntil;
-    // Debounce blocker toggles to avoid flicker when accessibility events change rapidly
     private static final long MIN_BLOCKER_TOGGLE_MS = 600L;
     private long lastBlockerToggle = 0L;
     private Runnable pendingShow;
@@ -134,6 +131,7 @@ public class KismartAccessibilityService extends AccessibilityService {
             // If the user is on a dangerous settings surface (factory reset / accessibility / uninstall)
             // block it explicitly and mark as holding dangerous settings so the UI can hint appropriately.
             if (isFinancedDeviceControlSurface(packageName)) {
+                if (DEBUG_BUILD) Log.d(TAG, "Detected dangerous device control surface in package: " + packageName);
                 showBlocker(true);
                 return;
             }
@@ -155,8 +153,17 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private boolean isFinancedDeviceControlSurface(String packageName) {
-        if (isDangerousSettingsScreen(packageName)) return true;
-        return isDangerousRemovalSurface();
+        // Detect dangerous settings screen with improved text collection
+        if (isDangerousSettingsScreen(packageName)) {
+            if (DEBUG_BUILD) Log.d(TAG, "isFinancedDeviceControlSurface: detected dangerous settings screen");
+            return true;
+        }
+        // Detect dangerous removal surface (app info, uninstall pages)
+        if (isDangerousRemovalSurface()) {
+            if (DEBUG_BUILD) Log.d(TAG, "isFinancedDeviceControlSurface: detected dangerous removal surface");
+            return true;
+        }
+        return false;
     }
 
     private boolean isAllowedSystemPackage(String packageName) {
@@ -181,12 +188,6 @@ public class KismartAccessibilityService extends AccessibilityService {
                 || "com.android.systemui".equals(value);
     }
 
-    private boolean isFinancedPolicy(Policy policy) {
-        if (policy == null) return false;
-        if (policy.contractId == null || policy.contractId.trim().isEmpty()) return false;
-        return !"Completed".equalsIgnoreCase(policy.status);
-    }
-
     private boolean isSettingsLikePackage(String packageName) {
         String value = packageName == null ? "" : packageName.toLowerCase();
         return "com.android.settings".equals(value)
@@ -204,10 +205,16 @@ public class KismartAccessibilityService extends AccessibilityService {
             root = getRootInActiveWindow();
             if (root == null) return false;
             String screenText = collectScreenText(root).toLowerCase();
-            return isFactoryResetScreen(screenText)
-                    || isAccessibilityControlScreen(screenText)
-                    || isDeviceAdminControlScreen(screenText)
-                    || isKismartRemovalScreen(screenText);
+            boolean isFactory = isFactoryResetScreen(screenText);
+            boolean isAccessibility = isAccessibilityControlScreen(screenText);
+            boolean isAdmin = isDeviceAdminControlScreen(screenText);
+            boolean isKismartRemoval = isKismartRemovalScreen(screenText);
+            
+            if (DEBUG_BUILD) {
+                Log.d(TAG, "isDangerousSettingsScreen: factory=" + isFactory + " accessibility=" + isAccessibility + " admin=" + isAdmin + " kismartRemoval=" + isKismartRemoval);
+            }
+            
+            return isFactory || isAccessibility || isAdmin || isKismartRemoval;
         } catch (RuntimeException ignored) {
             return false;
         } finally {
@@ -221,7 +228,15 @@ public class KismartAccessibilityService extends AccessibilityService {
             root = getRootInActiveWindow();
             if (root == null) return false;
             String screenText = collectScreenText(root).toLowerCase();
-            return isKismartRemovalScreen(screenText);
+            boolean isFactory = isFactoryResetScreen(screenText);
+            boolean isAccessibility = isAccessibilityControlScreen(screenText);
+            boolean isKismartRemoval = isKismartRemovalScreen(screenText);
+            
+            if (DEBUG_BUILD && (isFactory || isAccessibility || isKismartRemoval)) {
+                Log.d(TAG, "isDangerousRemovalSurface: factory=" + isFactory + " accessibility=" + isAccessibility + " kismartRemoval=" + isKismartRemoval);
+            }
+            
+            return isFactory || isAccessibility || isKismartRemoval;
         } catch (RuntimeException ignored) {
             return false;
         } finally {
@@ -230,7 +245,8 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private boolean isFactoryResetScreen(String screenText) {
-        return containsAny(screenText,
+        if (screenText == null) return false;
+        boolean result = containsAny(screenText,
                 "factory reset",
                 "factory data reset",
                 "reset options",
@@ -244,10 +260,19 @@ public class KismartAccessibilityService extends AccessibilityService {
                 "wipe data",
                 "format data",
                 "restore factory settings",
-                "clear all data");
+                "clear all data",
+                "recovery",
+                "erasing",
+                "reset to factory defaults",
+                "boot loader");
+        if (result && DEBUG_BUILD) {
+            Log.d(TAG, "Factory reset screen detected: " + screenText.substring(0, Math.min(200, screenText.length())));
+        }
+        return result;
     }
+
     private boolean isAccessibilityControlScreen(String screenText) {
-        if (!screenText.contains("accessibility")) return false;
+        if (screenText == null || !screenText.contains("accessibility")) return false;
         if (screenText.contains("kismart")) return true;
         return containsAny(screenText,
                 "downloaded apps",
@@ -263,6 +288,7 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private boolean isDeviceAdminControlScreen(String screenText) {
+        if (screenText == null) return false;
         return containsAny(screenText,
                 "device admin apps",
                 "device administrator",
@@ -271,8 +297,9 @@ public class KismartAccessibilityService extends AccessibilityService {
                 "deactivate device admin",
                 "device admin");
     }
+
     private boolean isKismartRemovalScreen(String screenText) {
-        if (!screenText.contains("kismart")) return false;
+        if (screenText == null || !screenText.contains("kismart")) return false;
         return containsAny(screenText,
                 "uninstall",
                 "uninstall app",
@@ -298,6 +325,7 @@ public class KismartAccessibilityService extends AccessibilityService {
                 "trash",
                 "drag here to uninstall");
     }
+
     private boolean containsAny(String text, String... needles) {
         if (text == null) return false;
         for (String needle : needles) {
@@ -313,7 +341,8 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private void appendNodeText(AccessibilityNodeInfo node, StringBuilder builder, int depth) {
-        if (node == null || depth > 8 || builder.length() > 12000) return;
+        // Increased depth limit to catch deeply nested factory reset options
+        if (node == null || depth > 15 || builder.length() > 20000) return;
         appendText(builder, node.getText());
         appendText(builder, node.getContentDescription());
         appendText(builder, node.getViewIdResourceName());
@@ -389,7 +418,6 @@ public class KismartAccessibilityService extends AccessibilityService {
         long since = now - lastBlockerToggle;
         if (blockerVisible) return;
         if (since < MIN_BLOCKER_TOGGLE_MS) {
-            // schedule delayed show to avoid rapid toggles
             if (pendingShow != null) handler.removeCallbacks(pendingShow);
             pendingShow = () -> {
                 lastBlockerToggle = System.currentTimeMillis();
