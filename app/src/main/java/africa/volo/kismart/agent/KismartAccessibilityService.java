@@ -16,8 +16,13 @@ import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.util.Log;
 
 public class KismartAccessibilityService extends AccessibilityService {
+    private static final String TAG = "KismartA11y";
+    // Enable verbose a11y debug logging when DEBUG_BUILD is true
+    // Set to true to capture detailed logs for debugging; set to false to reduce noise.
+    private static final boolean DEBUG_BUILD = true;
     private static final long WATCHDOG_INTERVAL_MS = 450L;
     private static final long EMERGENCY_ALLOW_MS = 30000L;
     private static final long KISMART_OPEN_ALLOW_MS = 5000L;
@@ -110,6 +115,17 @@ public class KismartAccessibilityService extends AccessibilityService {
                 DeviceControls.enforceFullLock(this);
             }
             return;
+        }
+
+        if (DEBUG_BUILD) {
+            try {
+                AccessibilityNodeInfo root = getRootInActiveWindow();
+                String screenText = root == null ? "<no-root>" : collectScreenText(root).toLowerCase();
+                Log.d(TAG, "enforceCurrentWindow: package=" + packageName + " policy=" + (policy==null?"null":policy.status) + " paymentOnly=" + policy.paymentOnlyActive + " holdingDangerous=" + holdingDangerousSettings + " blockerVisible=" + blockerVisible + " screenTextPreview=" + (screenText.length()>250 ? screenText.substring(0,250)+"..." : screenText));
+                if (root != null) root.recycle();
+            } catch (Throwable t) {
+                Log.d(TAG, "enforceCurrentWindow: failed to collect screen text: " + t);
+            }
         }
 
         // Only show the protection overlay when the account is in "limited" (payment-only) mode.
@@ -403,11 +419,26 @@ public class KismartAccessibilityService extends AccessibilityService {
         try {
             windowManager.addView(blocker, params);
             blockerVisible = true;
+            if (DEBUG_BUILD) {
+                Log.d(TAG, "actuallyShowBlocker: added view; dangerousSettings=" + dangerousSettings);
+                try {
+                    AccessibilityNodeInfo root = getRootInActiveWindow();
+                    if (root != null) {
+                        String text = collectScreenText(root).toLowerCase();
+                        Log.d(TAG, "actuallyShowBlocker: screenText(len=" + text.length() + ") preview=" + (text.length()>500?text.substring(0,500)+"...":text));
+                        root.recycle();
+                    }
+                } catch (Throwable t) {
+                    Log.d(TAG, "actuallyShowBlocker: failed to collect screen text: " + t);
+                }
+            }
         } catch (IllegalStateException ignored) {
             blockerVisible = true;
-        } catch (Exception ignored) {
+            if (DEBUG_BUILD) Log.d(TAG, "actuallyShowBlocker: IllegalStateException while adding view; assuming visible");
+        } catch (Exception e) {
             blockerVisible = false;
             holdingDangerousSettings = false;
+            if (DEBUG_BUILD) Log.d(TAG, "actuallyShowBlocker: failed to add view: " + e);
         }
     }
 
