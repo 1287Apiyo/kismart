@@ -13,6 +13,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
 import android.os.UserManager;
+import android.util.Log;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -20,12 +21,21 @@ import java.util.List;
 import java.util.Set;
 
 final class DeviceControls {
+    private static final String TAG = "KismartControls";
     private static final String KEY_PAYMENT_ONLY_SUSPENDED_PACKAGES = "payment_only_suspended_packages";
     private static final String KEY_PAYMENT_ONLY_HIDDEN_PACKAGES = "payment_only_hidden_packages";
     private static final String[] DEFAULT_PAYMENT_PACKAGES = {
             "com.safaricom.mpesa",
             "com.safaricom.mpesa.lifestyle",
             "ke.co.safaricom.mpesa"
+    };
+    
+    // Packages that must be hidden in payment-only mode
+    private static final String[] ALWAYS_HIDDEN_PACKAGES = {
+            "com.android.settings",
+            "com.android.recovery",
+            "com.google.android.setupwizard",
+            "com.android.managedprovisioning"
     };
 
     private DeviceControls() {
@@ -274,10 +284,17 @@ final class DeviceControls {
             manager.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_BLUETOOTH);
             manager.addUserRestriction(admin, UserManager.DISALLOW_USB_FILE_TRANSFER);
             manager.setStatusBarDisabled(admin, true);
+            
+            // Block factory reset at the device policy level
+            manager.addUserRestriction(admin, UserManager.DISALLOW_FACTORY_RESET);
         } catch (SecurityException ignored) {
         }
         String[] allowedPackages = paymentOnlyPackages(context, policy);
         setKismartAsHome(context, manager, admin);
+        
+        // Hide settings and other dangerous apps
+        hideSettingsAndDangerousApps(context, manager, admin);
+        
         disableNonAllowedLaunchableApps(context, manager, admin, allowedPackages);
     }
 
@@ -300,6 +317,9 @@ final class DeviceControls {
             manager.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_BLUETOOTH);
             manager.addUserRestriction(admin, UserManager.DISALLOW_USB_FILE_TRANSFER);
             manager.setStatusBarDisabled(admin, false);
+            
+            // Block factory reset in full lock mode too
+            manager.addUserRestriction(admin, UserManager.DISALLOW_FACTORY_RESET);
         } catch (SecurityException ignored) {
         }
     }
@@ -336,6 +356,7 @@ final class DeviceControls {
         manager.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_WIFI);
         manager.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_BLUETOOTH);
         manager.clearUserRestriction(admin, UserManager.DISALLOW_USB_FILE_TRANSFER);
+        manager.clearUserRestriction(admin, UserManager.DISALLOW_FACTORY_RESET);
         try {
             manager.setStatusBarDisabled(admin, false);
             manager.setKeyguardDisabled(admin, false);
@@ -403,6 +424,17 @@ final class DeviceControls {
                 manager.setLockTaskFeatures(admin, DevicePolicyManager.LOCK_TASK_FEATURE_NONE);
             }
         } catch (SecurityException | IllegalArgumentException ignored) {
+        }
+    }
+
+    private static void hideSettingsAndDangerousApps(Context context, DevicePolicyManager manager, ComponentName admin) {
+        for (String packageName : ALWAYS_HIDDEN_PACKAGES) {
+            try {
+                if (manager.setApplicationHidden(admin, packageName, true)) {
+                    Log.d(TAG, "Hidden dangerous app: " + packageName);
+                }
+            } catch (SecurityException | IllegalArgumentException ignored) {
+            }
         }
     }
 
