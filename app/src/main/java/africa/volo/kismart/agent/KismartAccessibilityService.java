@@ -70,7 +70,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         if (info == null) info = new AccessibilityServiceInfo();
         info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK;
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC;
-        info.notificationTimeout = 0L; // immediate response
+        info.notificationTimeout = 0L;
         info.flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
                 | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
         setServiceInfo(info);
@@ -101,7 +101,6 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         // Get current package
         String packageName = activePackageName();
-        // If we can't determine the package, hide (safety)
         if (packageName.isEmpty()) {
             hideBlockerNow();
             return;
@@ -113,13 +112,33 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Always hide on launcher / home screen
+        // ======= LIMITED MODE (paymentOnlyActive) =======
+        // This logic is taken directly from your old working code,
+        // only the show/hide methods are now the stable "Now" versions.
+        if (policy.paymentOnlyActive) {
+            // Allow launcher, system packages, and emergency dialer
+            if (isLauncherPackage(packageName) || isAllowedSystemPackage(packageName)) {
+                hideBlockerNow();
+            }
+            // Allow a brief window to open KISMART when "Open KISMART" button is pressed
+            else if (System.currentTimeMillis() < allowKismartOpenUntil
+                    && isOverlayEventPackage(packageName)) {
+                hideBlockerNow();
+            }
+            // Everything else – show the protection overlay
+            else {
+                showBlockerNow();
+            }
+            return;
+        }
+
+        // ======= FINANCED MODE (not limited) =======
+        // Show blocker ONLY on dangerous screens, hide everywhere else
         if (isLauncherPackage(packageName)) {
             hideBlockerNow();
             return;
         }
 
-        // Show blocker ONLY on dangerous screens, hide everywhere else
         boolean dangerous = isDangerousScreenNow(packageName);
         if (dangerous) {
             showBlockerNow();
@@ -130,15 +149,13 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     /** Checks both package type and actual on‑screen content */
     private boolean isDangerousScreenNow(String packageName) {
-        // In settings-like apps: check content for dangerous screens
         if (isSettingsLikePackage(packageName)) {
             return isDangerousSettingsScreenContent() || isDangerousRemovalSurfaceContent();
         }
-        // For any other app: only block if a KISMART removal dialog is visible
         return isDangerousRemovalSurfaceContent();
     }
 
-    // ========== Screen content detection ==========
+    // ========== Screen content detection (unchanged) ==========
     private boolean isDangerousSettingsScreenContent() {
         AccessibilityNodeInfo root = null;
         try {
@@ -170,7 +187,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         }
     }
 
-    // ---------- Keyword matchers ----------
+    // ---------- Keyword matchers (unchanged) ----------
     private boolean isFactoryResetScreen(String text) {
         return containsAny(text,
                 "factory reset", "factory data reset", "reset options",
@@ -213,6 +230,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         return false;
     }
 
+    // ---------- Package type helpers ----------
     private boolean isSettingsLikePackage(String pkg) {
         String v = pkg == null ? "" : pkg.toLowerCase();
         return "com.android.settings".equals(v) || v.contains(".settings")
@@ -226,6 +244,31 @@ public class KismartAccessibilityService extends AccessibilityService {
                 || v.equals("com.miui.home")
                 || v.equals("com.android.launcher")
                 || v.equals("com.google.android.apps.nexuslauncher");
+    }
+
+    // ---------- Allowed packages in limited mode ----------
+    private boolean isAllowedSystemPackage(String packageName) {
+        // Basic system packages always allowed
+        if ("android".equals(packageName)) return true;
+        if ("com.android.systemui".equals(packageName)) return true;
+        // Allow emergency dialer for EMERGENCY_ALLOW_MS after pressing Emergency button
+        if (System.currentTimeMillis() < emergencyAllowedUntil && isEmergencyPackage(packageName)) {
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isEmergencyPackage(String packageName) {
+        String v = packageName == null ? "" : packageName.toLowerCase();
+        return v.contains("dialer") || v.contains("incallui")
+                || v.contains("telecom") || v.contains("contacts");
+    }
+
+    private boolean isOverlayEventPackage(String packageName) {
+        String value = packageName == null ? "" : packageName.trim();
+        return getPackageName().equals(value)
+                || "android".equals(value)
+                || "com.android.systemui".equals(value);
     }
 
     // ========== Blocker show / hide (simple, no debounce) ==========
@@ -264,7 +307,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         }
     }
 
-    // ========== Helpers ==========
+    // ========== Helpers (unchanged) ==========
     private String activePackageName() {
         try {
             AccessibilityNodeInfo root = getRootInActiveWindow();
@@ -315,7 +358,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         if (!text.isEmpty()) builder.append(' ').append(text);
     }
 
-    // ========== UI ==========
+    // ========== UI (unchanged) ==========
     private View buildBlocker() {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.WHITE);
