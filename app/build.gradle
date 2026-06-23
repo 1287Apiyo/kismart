@@ -10,7 +10,14 @@ android {
         applicationId 'africa.volo.kismart.agent'
         minSdk 23
         targetSdk 35
-        versionCode 32
-        versionName '1.0.31'
+        versionCode 35
+        versionName '1.0.34'
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
     }
 }

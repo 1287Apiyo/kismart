@@ -11,6 +11,7 @@ This pilot APK allows local `http://` traffic so phones can reach a laptop backe
 - Enable Android Device Admin for screen-lock testing.
 - Pull policy from `/api/devices/:imei/policy`.
 - Acknowledge pending lock/restore commands through `/api/devices/:imei/sync`.
+- Keep enforcing the last synced admin policy while offline, then apply queued admin commands when the phone returns to the same network as the backend.
 - Use a fast sync path so the phone does not wait on a full Firestore collection save.
 - Send a phone identity bundle on every device request: app install ID, Android ID, build fingerprint, server-issued binding token, manufacturer, brand, model, and SDK level.
 - Report tamper/removal attempts through `/api/devices/:imei/tamper`.
@@ -79,7 +80,7 @@ device-agent/dist/KismartDeviceAgent-debug.apk
 
 9. In the dashboard, open **Device Operations** and apply **KISMART only** to test app-only mode, or **Full lock** to test the black lock screen.
 
-10. Keep the phone app open for the first test. `Limit` should keep the phone inside KISMART and block other apps. The in-app **Pay** button shows a fake STK prompt and records a test M-Pesa payment. `Full lock` should acknowledge the command and open a black lock screen. In Device Owner mode, Home, Recents, credential/settings paths, app control, and uninstall paths are restricted more aggressively.
+10. Keep the phone app open for the first test. `Limit` should keep the phone inside KISMART and block other apps. The in-app **Pay** button shows a fake STK prompt and records a test M-Pesa payment. `Full lock` opens a black lock screen. Admin commands stay queued if the phone is offline and are confirmed after the agent receives them and reports the applied command IDs on the next successful sync. In Device Owner mode, Home, Recents, credential/settings paths, app control, and uninstall paths are restricted more aggressively.
 
 11. Record a payment or press **Restore** in the dashboard, then tap **Sync Now** again to clear the restriction.
 

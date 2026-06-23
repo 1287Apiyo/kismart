@@ -7,6 +7,9 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkRequest;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -24,6 +27,8 @@ public class AgentSyncService extends Service {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean syncing;
     private long lastGuardTamperReportAt;
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     private final Runnable syncRunnable = new Runnable() {
         @Override
@@ -51,8 +56,10 @@ public class AgentSyncService extends Service {
         super.onCreate();
         DeviceControls.enforceFinancedDeviceHardening(this);
         DeviceControls.protectAppFromUninstall(this);
+        enforceLastKnownPolicy();
         createChannel();
         startForeground(NOTIFICATION_ID, notification("Monitoring KISMART policy"));
+        registerNetworkMonitor();
         handler.post(syncRunnable);
     }
 
@@ -60,13 +67,17 @@ public class AgentSyncService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         DeviceControls.enforceFinancedDeviceHardening(this);
         DeviceControls.protectAppFromUninstall(this);
+        enforceLastKnownPolicy();
         startForeground(NOTIFICATION_ID, notification("Monitoring KISMART policy"));
+        handler.removeCallbacks(syncRunnable);
+        handler.post(syncRunnable);
         return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
         handler.removeCallbacks(syncRunnable);
+        unregisterNetworkMonitor();
         executor.shutdownNow();
         super.onDestroy();
     }
@@ -95,10 +106,21 @@ public class AgentSyncService extends Service {
                     DeviceControls.applyPolicyFromBackground(this, policy);
                 }
             } catch (Exception ignored) {
+                enforceLastKnownPolicy();
             } finally {
                 syncing = false;
             }
         });
+    }
+
+    private void enforceLastKnownPolicy() {
+        Policy policy = KismartApi.lastPolicy(this);
+        if (policy == null) return;
+        boolean protectionGuardMissing = DeviceControls.enforceMissingProtectionGuard(this, policy);
+        boolean limitGuardMissing = !protectionGuardMissing && DeviceControls.enforceMissingLimitGuard(this, policy);
+        if (!protectionGuardMissing && !limitGuardMissing) {
+            DeviceControls.applyPolicyFromBackground(this, policy);
+        }
     }
 
     private void reportGuardTamper(String message) {
@@ -109,6 +131,35 @@ public class AgentSyncService extends Service {
             KismartApi.reportTamper(this, message);
         } catch (Exception ignored) {
         }
+    }
+
+    private void registerNetworkMonitor() {
+        if (networkCallback != null) return;
+        connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectivityManager == null) return;
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) {
+                handler.post(() -> {
+                    enforceLastKnownPolicy();
+                    syncOnce();
+                });
+            }
+        };
+        try {
+            connectivityManager.registerNetworkCallback(new NetworkRequest.Builder().build(), networkCallback);
+        } catch (Exception ignored) {
+            networkCallback = null;
+        }
+    }
+
+    private void unregisterNetworkMonitor() {
+        if (connectivityManager == null || networkCallback == null) return;
+        try {
+            connectivityManager.unregisterNetworkCallback(networkCallback);
+        } catch (Exception ignored) {
+        }
+        networkCallback = null;
     }
 
     private Notification notification(String text) {

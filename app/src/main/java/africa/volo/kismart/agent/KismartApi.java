@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.os.Build;
 import android.provider.Settings;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -26,7 +27,8 @@ final class KismartApi {
     static final String KEY_LAST_POLICY_AT = "last_policy_at";
     static final String KEY_INSTALL_ID = "install_id";
     static final String KEY_BINDING_TOKEN = "binding_token";
-    static final String APP_VERSION = "android-1.0.31";
+    private static final String KEY_APPLIED_COMMAND_IDS = "applied_command_ids";
+    static final String APP_VERSION = "android-1.0.34";
     static final String DEFAULT_SERVER_URL = "http://192.168.98.7:8787";
     static final String DEFAULT_IMEI = "357527486213862";
     static final String DEFAULT_DEVICE_SECRET = "change-this-device-secret";
@@ -65,10 +67,12 @@ final class KismartApi {
         body.put("battery", 0);
         body.put("message", "Device agent manual sync");
         body.put("identity", deviceIdentity(context));
+        body.put("appliedCommandIds", pendingAppliedCommandIds(context));
         JSONObject response = request(context, "POST", baseUrl + "/api/devices/" + encode(imei) + "/sync", body);
         JSONObject policy = response.optJSONObject("policy");
         if (policy == null) throw new IllegalStateException("Backend did not return a policy.");
         persistPolicy(context, policy);
+        rememberCommandsToAcknowledge(context, response, policy);
         return Policy.fromJson(policy);
     }
 
@@ -235,6 +239,43 @@ final class KismartApi {
         editor.putString(KEY_LAST_POLICY, policy.toString());
         editor.putLong(KEY_LAST_POLICY_AT, System.currentTimeMillis());
         editor.apply();
+    }
+
+    private static JSONArray pendingAppliedCommandIds(Context context) {
+        String raw = prefs(context).getString(KEY_APPLIED_COMMAND_IDS, "");
+        if (raw == null || raw.trim().isEmpty()) return new JSONArray();
+        try {
+            return new JSONArray(raw);
+        } catch (Exception ignored) {
+            prefs(context).edit().remove(KEY_APPLIED_COMMAND_IDS).apply();
+            return new JSONArray();
+        }
+    }
+
+    private static void rememberCommandsToAcknowledge(Context context, JSONObject response, JSONObject policy) {
+        JSONArray commands = response.optJSONArray("commands");
+        if (commands == null || commands.length() == 0) {
+            commands = policy.optJSONArray("pendingCommands");
+        }
+        JSONArray ids = commandIds(commands);
+        SharedPreferences.Editor editor = prefs(context).edit();
+        if (ids.length() > 0) {
+            editor.putString(KEY_APPLIED_COMMAND_IDS, ids.toString());
+        } else {
+            editor.remove(KEY_APPLIED_COMMAND_IDS);
+        }
+        editor.apply();
+    }
+
+    private static JSONArray commandIds(JSONArray commands) {
+        JSONArray ids = new JSONArray();
+        if (commands == null) return ids;
+        for (int index = 0; index < commands.length(); index++) {
+            JSONObject command = commands.optJSONObject(index);
+            String id = command == null ? "" : command.optString("id", "").trim();
+            if (!id.isEmpty()) ids.put(id);
+        }
+        return ids;
     }
 
     private static String valueOrFallback(String value, String fallback) {

@@ -82,7 +82,8 @@ public class MainActivity extends Activity {
         if (policy != null) {
             latestPolicy = policy;
             renderPolicy(policy);
-            if (DeviceControls.isFullLockPolicy(policy) && KismartApi.isLastPolicyFresh(this)) {
+            DeviceControls.applyPolicy(this, policy);
+            if (DeviceControls.isFullLockPolicy(policy)) {
                 DeviceControls.enforceFullLock(this);
             }
         }
@@ -291,7 +292,10 @@ public class MainActivity extends Activity {
                     setDetail("Account synced.");
                 });
             } catch (Exception error) {
-                runOnUiThread(() -> setDetail("Sync failed: " + error.getMessage()));
+                runOnUiThread(() -> {
+                    enforceCachedPolicy();
+                    setDetail("Offline. Last admin policy is still active. New admin actions apply when this phone rejoins the same network.");
+                });
             }
         });
     }
@@ -309,10 +313,22 @@ public class MainActivity extends Activity {
                     renderPolicy(policy);
                 });
             } catch (Exception ignored) {
+                runOnUiThread(() -> enforceCachedPolicy());
             } finally {
                 syncing = false;
             }
         });
+    }
+
+    private void enforceCachedPolicy() {
+        Policy policy = KismartApi.lastPolicy(this);
+        if (policy == null) return;
+        latestPolicy = policy;
+        DeviceControls.applyPolicy(this, policy);
+        renderPolicy(policy);
+        if (DeviceControls.isFullLockPolicy(policy)) {
+            DeviceControls.enforceFullLock(this);
+        }
     }
 
     private void showStkPrompt() {

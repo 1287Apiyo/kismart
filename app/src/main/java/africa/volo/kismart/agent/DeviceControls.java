@@ -16,6 +16,7 @@ import android.os.UserManager;
 import android.util.Log;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -329,7 +330,11 @@ final class DeviceControls {
             manager.addUserRestriction(admin, UserManager.DISALLOW_FACTORY_RESET);
             manager.addUserRestriction(admin, UserManager.DISALLOW_APPS_CONTROL);
             manager.addUserRestriction(admin, UserManager.DISALLOW_UNINSTALL_APPS);
+            manager.addUserRestriction(admin, UserManager.DISALLOW_DEBUGGING_FEATURES);
             manager.setUninstallBlocked(admin, admin.getPackageName(), true);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                manager.setUserControlDisabledPackages(admin, Collections.singletonList(admin.getPackageName()));
+            }
         } catch (SecurityException | IllegalArgumentException ignored) {
         }
     }
