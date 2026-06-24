@@ -31,12 +31,13 @@ public class KismartDeviceAdminReceiver extends DeviceAdminReceiver {
     @Override
     public String onDisableRequested(Context context, Intent intent) {
         // Prevent disabling this device admin
-        return "KISMART agent cannot be disabled while phone is financed. Contact administrator to remove protection.";
+        return "This device manager cannot be disabled while the phone is financed. Contact the administrator to remove protection.";
     }
 
     private void restartProtection(Context context) {
         DeviceControls.enforceFinancedDeviceHardening(context);
         DeviceControls.protectAppFromUninstall(context);
+        DeviceControls.hideLauncherEntry(context);
         AgentSyncService.start(context);
     }
 

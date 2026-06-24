@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">KISMART Device Agent</string>
-    <string name="device_admin_description">Allows KISMART to protect this financed phone and apply approved account controls.</string>
-    <string name="accessibility_service_description">Keeps the phone inside KISMART while Limit mode is active.</string>
+    <string name="app_name">Device Service</string>
+    <string name="device_admin_description">Allows this phone to be protected and approved account controls to be applied.</string>
+    <string name="accessibility_service_description">Keeps the phone inside approved payment mode while Limit mode is active.</string>
 </resources>

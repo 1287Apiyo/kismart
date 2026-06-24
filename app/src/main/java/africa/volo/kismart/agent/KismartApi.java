@@ -29,7 +29,8 @@ final class KismartApi {
     static final String KEY_BINDING_TOKEN = "binding_token";
     private static final String KEY_APPLIED_COMMAND_IDS = "applied_command_ids";
     static final String APP_VERSION = "android-1.0.34";
-    static final String DEFAULT_SERVER_URL = "http://192.168.98.7:8787";
+    static final String DEFAULT_SERVER_URL = "http://192.168.98.3:8787";
+    private static final String LEGACY_SERVER_URL = "http://192.168.98.7:8787";
     static final String DEFAULT_IMEI = "357527486213862";
     static final String DEFAULT_DEVICE_SECRET = "change-this-device-secret";
     private static final int CONNECT_TIMEOUT_MS = 20000;
@@ -44,7 +45,7 @@ final class KismartApi {
 
     static Policy fetchPolicy(Context context) throws Exception {
         SharedPreferences prefs = prefs(context);
-        String baseUrl = cleanBaseUrl(prefs.getString(KEY_SERVER_URL, ""));
+        String baseUrl = serverUrl(context);
         String imei = prefs.getString(KEY_IMEI, "");
         if (baseUrl.isEmpty() || imei.isEmpty()) {
             throw new IllegalStateException("Enter backend URL and device IMEI first.");
@@ -56,7 +57,7 @@ final class KismartApi {
 
     static Policy sync(Context context) throws Exception {
         SharedPreferences prefs = prefs(context);
-        String baseUrl = cleanBaseUrl(prefs.getString(KEY_SERVER_URL, ""));
+        String baseUrl = serverUrl(context);
         String imei = prefs.getString(KEY_IMEI, "");
         if (baseUrl.isEmpty() || imei.isEmpty()) {
             throw new IllegalStateException("Enter backend URL and device IMEI first.");
@@ -78,7 +79,7 @@ final class KismartApi {
 
     static JSONObject reportTamper(Context context, String reason) throws Exception {
         SharedPreferences prefs = prefs(context);
-        String baseUrl = cleanBaseUrl(prefs.getString(KEY_SERVER_URL, ""));
+        String baseUrl = serverUrl(context);
         String imei = prefs.getString(KEY_IMEI, "");
         JSONObject body = new JSONObject();
         body.put("reason", reason);
@@ -91,7 +92,7 @@ final class KismartApi {
 
     static Policy simulateStkPayment(Context context, int amount) throws Exception {
         SharedPreferences prefs = prefs(context);
-        String baseUrl = cleanBaseUrl(prefs.getString(KEY_SERVER_URL, ""));
+        String baseUrl = serverUrl(context);
         String imei = prefs.getString(KEY_IMEI, "");
         if (baseUrl.isEmpty() || imei.isEmpty()) {
             throw new IllegalStateException("Enter backend URL and device IMEI first.");
@@ -111,7 +112,7 @@ final class KismartApi {
 
     static JSONObject submitPaybillStk(Context context, int amount, String phoneNumber) throws Exception {
         SharedPreferences prefs = prefs(context);
-        String baseUrl = cleanBaseUrl(prefs.getString(KEY_SERVER_URL, ""));
+        String baseUrl = serverUrl(context);
         String imei = prefs.getString(KEY_IMEI, "");
         if (baseUrl.isEmpty() || imei.isEmpty()) {
             throw new IllegalStateException("Enter backend URL and device IMEI first.");
@@ -139,6 +140,18 @@ final class KismartApi {
     static boolean isLastPolicyFresh(Context context) {
         long syncedAt = prefs(context).getLong(KEY_LAST_POLICY_AT, 0L);
         return syncedAt > 0L && System.currentTimeMillis() - syncedAt < 30000L;
+    }
+
+    static String serverUrl(Context context) {
+        SharedPreferences prefs = prefs(context);
+        String cleaned = cleanBaseUrl(prefs.getString(KEY_SERVER_URL, ""));
+        if (cleaned.isEmpty() || LEGACY_SERVER_URL.equals(cleaned)) {
+            if (!DEFAULT_SERVER_URL.equals(cleaned)) {
+                prefs.edit().putString(KEY_SERVER_URL, DEFAULT_SERVER_URL).apply();
+            }
+            return DEFAULT_SERVER_URL;
+        }
+        return cleaned;
     }
 
     private static JSONObject request(Context context, String method, String urlValue, JSONObject body) throws Exception {

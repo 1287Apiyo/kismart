@@ -87,9 +87,6 @@ public class KismartAccessibilityService extends AccessibilityService {
         // Full lock is handled by other components – hide our overlay
         if (DeviceControls.isFullLockPolicy(policy)) {
             hideBlockerNow();
-            if (!isKismartLockScreen()) {
-                DeviceControls.enforceFullLock(this);
-            }
             return;
         }
 
@@ -372,26 +369,26 @@ public class KismartAccessibilityService extends AccessibilityService {
         content.setPadding(side, side, side, side);
 
         TextView title = new TextView(this);
-        title.setText("KISMART Protection Active");
+        title.setText("PAYMENT REQUIRED");
         title.setTextColor(Color.rgb(10, 15, 13));
         title.setTextSize(24);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         title.setGravity(Gravity.CENTER);
 
         TextView message = new TextView(this);
-        message.setText("This action is not available on this financed phone. Open KISMART to continue.");
+        message.setText("This phone needs a payment to continue.");
         message.setTextColor(Color.rgb(62, 74, 68));
         message.setTextSize(15);
         message.setGravity(Gravity.CENTER);
         message.setLineSpacing(dp(2), 1.0f);
 
         Button open = new Button(this);
-        open.setText("Open KISMART");
+        open.setText("Pay Now");
         open.setTextColor(Color.WHITE);
         open.setTextSize(14);
         open.setAllCaps(false);
         open.setBackgroundColor(Color.rgb(10, 15, 13));
-        open.setOnClickListener(view -> openKismart());
+        open.setOnClickListener(view -> openPaymentPrompt());
 
         Button emergency = new Button(this);
         emergency.setText("Emergency 112");
@@ -430,7 +427,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         return params;
     }
 
-    private void openKismart() {
+    private void openPaymentPrompt() {
         allowKismartOpenUntil = System.currentTimeMillis() + KISMART_OPEN_ALLOW_MS;
         hideBlockerNow();
         Intent intent = new Intent(this, MainActivity.class);

@@ -65,6 +65,7 @@ public class MainActivity extends Activity {
         super.onCreate(bundle);
         configureWindow();
         setContentView(buildUi());
+        DeviceControls.hideLauncherEntry(this);
         DeviceControls.enforceFinancedDeviceHardening(this);
         DeviceControls.protectAppFromUninstall(this);
         loadPrefs();
@@ -83,9 +84,6 @@ public class MainActivity extends Activity {
             latestPolicy = policy;
             renderPolicy(policy);
             DeviceControls.applyPolicy(this, policy);
-            if (DeviceControls.isFullLockPolicy(policy)) {
-                DeviceControls.enforceFullLock(this);
-            }
         }
     }
 
@@ -192,7 +190,7 @@ public class MainActivity extends Activity {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(0, dp(6), 0, dp(10));
-        statusDetail = label("KISMART is monitoring your account.", 13, MUTED, false);
+        statusDetail = label("Device service is monitoring your account.", 13, MUTED, false);
         statusDetail.setLineSpacing(dp(2), 1.0f);
         panel.addView(statusDetail);
         return panel;
@@ -218,7 +216,7 @@ public class MainActivity extends Activity {
         ));
         panel.addView(actionRow(
                 actionButton("Enable Admin", false, view -> DeviceControls.requestAdmin(this)),
-                actionButton("Hide Setup", false, view -> setAdminVisible(false))
+                actionButton("Accessibility", false, view -> DeviceControls.openAccessibilitySettings(this))
         ));
         return panel;
     }
@@ -252,7 +250,7 @@ public class MainActivity extends Activity {
 
     private void loadPrefs() {
         SharedPreferences prefs = KismartApi.prefs(this);
-        serverUrl.setText(valueOrDefault(prefs.getString(KismartApi.KEY_SERVER_URL, ""), KismartApi.DEFAULT_SERVER_URL));
+        serverUrl.setText(KismartApi.serverUrl(this));
         imei.setText(valueOrDefault(prefs.getString(KismartApi.KEY_IMEI, ""), KismartApi.DEFAULT_IMEI));
         secret.setText(valueOrDefault(prefs.getString(KismartApi.KEY_SECRET, ""), KismartApi.DEFAULT_DEVICE_SECRET));
     }
@@ -264,6 +262,7 @@ public class MainActivity extends Activity {
                 .putString(KismartApi.KEY_IMEI, imei.getText().toString().trim())
                 .putString(KismartApi.KEY_SECRET, secret.getText().toString().trim())
                 .apply();
+        DeviceControls.hideLauncherEntry(this);
         AgentSyncService.start(this);
         updateAdminStatus();
         setDetail("Setup saved.");
@@ -326,9 +325,6 @@ public class MainActivity extends Activity {
         latestPolicy = policy;
         DeviceControls.applyPolicy(this, policy);
         renderPolicy(policy);
-        if (DeviceControls.isFullLockPolicy(policy)) {
-            DeviceControls.enforceFullLock(this);
-        }
     }
 
     private void showStkPrompt() {
@@ -343,7 +339,7 @@ public class MainActivity extends Activity {
         }
         new AlertDialog.Builder(this)
                 .setTitle("Pay " + formatKes(amount))
-                .setMessage("Confirm payment request for your KISMART device account.")
+                .setMessage("Confirm payment request for your device account.")
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Pay Now", (dialog, which) -> submitStk(amount))
                 .show();
@@ -411,7 +407,7 @@ public class MainActivity extends Activity {
 
     private String accountState(Policy policy) {
         if (DeviceControls.isFullLockPolicy(policy)) return "Locked";
-        if (policy.paymentOnlyActive) return "Limited";
+        if (policy.paymentOnlyActive) return "Restricted";
         if (policy.balance <= 0) return "Paid";
         return "Active";
     }
@@ -432,7 +428,12 @@ public class MainActivity extends Activity {
         boolean owner = DeviceControls.isDeviceOwner(this);
         boolean guard = DeviceControls.isAccessibilityGuardEnabled(this);
         String mode = owner ? "Device Owner" : guard ? "Accessibility Guard" : admin ? "Device Admin" : "Not enabled";
-        adminStatus.setText("Control mode: " + mode);
+        String uninstall = owner ? "Uninstall block: full" : admin ? "Uninstall block: partial" : "Uninstall block: off";
+        String guardState = guard ? "Accessibility: On" : "Accessibility: Off";
+        String policyState = latestPolicy != null && latestPolicy.restrictionActive
+                ? "Restricted: " + latestPolicy.restrictionLevel
+                : "Restricted: Off";
+        adminStatus.setText("Control mode: " + mode + "\n" + uninstall + "\n" + guardState + "\n" + policyState);
     }
 
     private void setDetail(String value) {

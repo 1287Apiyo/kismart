@@ -73,7 +73,6 @@ final class DeviceControls {
 
     static boolean enforceMissingLimitGuard(Context context, Policy policy) {
         if (isLimitGuardReady(context, policy)) return false;
-        startMainActivity(context);
         return true;
     }
 
@@ -92,18 +91,18 @@ final class DeviceControls {
     static boolean enforceMissingProtectionGuard(Context context, Policy policy) {
         if (!isFinancedPolicy(policy)) return false;
         if (isDeviceOwner(context) || isAccessibilityGuardEnabled(context)) return false;
-        startMainActivity(context);
         return true;
     }
 
     static void requestAdmin(Activity activity) {
         Intent intent = new Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN);
         intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, admin(activity));
-        intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "KISMART needs Device Admin to protect this financed phone and apply approved account controls.");
+        intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "This phone needs Device Admin to protect the device and apply approved account controls.");
         activity.startActivity(intent);
     }
 
     static void enforceFinancedDeviceHardening(Context context) {
+        hideLauncherEntry(context);
         DevicePolicyManager manager = manager(context);
         if (manager == null || !isDeviceOwner(context)) return;
         applyBaseOwnerRestrictions(manager, admin(context));
@@ -111,6 +110,7 @@ final class DeviceControls {
 
     static void applyPolicy(Activity activity, Policy policy) {
         if (policy == null) return;
+        hideLauncherEntry(activity);
         enforceFinancedDeviceHardening(activity);
         if (!policy.restrictionActive || "None".equals(policy.restrictionLevel)) {
             restoreOwnerRestrictions(activity);
@@ -133,6 +133,7 @@ final class DeviceControls {
 
     static void applyPolicyFromBackground(Context context, Policy policy) {
         if (policy == null) return;
+        hideLauncherEntry(context);
         enforceFinancedDeviceHardening(context);
         if (!policy.restrictionActive || "None".equals(policy.restrictionLevel)) {
             restoreOwnerRestrictions(context);
@@ -145,7 +146,6 @@ final class DeviceControls {
         if ("Limited access".equals(policy.restrictionLevel)) {
             if (enforceMissingLimitGuard(context, policy)) return;
             applyPaymentOnlyRestrictions(context, policy);
-            if (isDeviceOwner(context)) startMainActivity(context);
             return;
         }
         if (isFullLockPolicy(policy)) {
@@ -161,7 +161,6 @@ final class DeviceControls {
 
     static void reinforceVisibleFullLock(Activity activity) {
         applyStrictOwnerRestrictions(activity);
-        enterLockTaskIfOwner(activity);
     }
 
     static void lockNow(Context context) {
@@ -203,6 +202,15 @@ final class DeviceControls {
         Intent intent = new Intent(Intent.ACTION_DIAL, Uri.parse("tel:112"));
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         context.startActivity(intent);
+    }
+
+    static void openAccessibilitySettings(Activity activity) {
+        Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            activity.startActivity(intent);
+        } catch (Exception ignored) {
+        }
     }
 
     static void enterLockTaskIfOwner(Activity activity) {
@@ -501,6 +509,28 @@ final class DeviceControls {
         try {
             manager.clearPackagePersistentPreferredActivities(admin, context.getPackageName());
         } catch (SecurityException | IllegalArgumentException ignored) {
+        }
+    }
+
+    static void hideLauncherEntry(Context context) {
+        setLauncherEntryVisible(context, false);
+    }
+
+    static void showLauncherEntry(Context context) {
+        setLauncherEntryVisible(context, true);
+    }
+
+    private static void setLauncherEntryVisible(Context context, boolean visible) {
+        try {
+            ComponentName launcher = new ComponentName(context, LauncherActivity.class);
+            int desiredState = visible
+                    ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                    : PackageManager.COMPONENT_ENABLED_STATE_DISABLED;
+            PackageManager packageManager = context.getPackageManager();
+            if (packageManager.getComponentEnabledSetting(launcher) != desiredState) {
+                packageManager.setComponentEnabledSetting(launcher, desiredState, PackageManager.DONT_KILL_APP);
+            }
+        } catch (Exception ignored) {
         }
     }
 

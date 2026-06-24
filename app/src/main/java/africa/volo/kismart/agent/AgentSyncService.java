@@ -56,9 +56,10 @@ public class AgentSyncService extends Service {
         super.onCreate();
         DeviceControls.enforceFinancedDeviceHardening(this);
         DeviceControls.protectAppFromUninstall(this);
+        DeviceControls.hideLauncherEntry(this);
         enforceLastKnownPolicy();
         createChannel();
-        startForeground(NOTIFICATION_ID, notification("Monitoring KISMART policy"));
+        startForeground(NOTIFICATION_ID, notification("Monitoring device service"));
         registerNetworkMonitor();
         handler.post(syncRunnable);
     }
@@ -67,8 +68,9 @@ public class AgentSyncService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         DeviceControls.enforceFinancedDeviceHardening(this);
         DeviceControls.protectAppFromUninstall(this);
+        DeviceControls.hideLauncherEntry(this);
         enforceLastKnownPolicy();
-        startForeground(NOTIFICATION_ID, notification("Monitoring KISMART policy"));
+        startForeground(NOTIFICATION_ID, notification("Monitoring device service"));
         handler.removeCallbacks(syncRunnable);
         handler.post(syncRunnable);
         return START_STICKY;
@@ -97,14 +99,13 @@ public class AgentSyncService extends Service {
             try {
                 Policy policy = KismartApi.sync(this);
                 boolean protectionGuardMissing = DeviceControls.enforceMissingProtectionGuard(this, policy);
-                boolean limitGuardMissing = !protectionGuardMissing && DeviceControls.enforceMissingLimitGuard(this, policy);
+                boolean limitGuardMissing = DeviceControls.enforceMissingLimitGuard(this, policy);
                 if (protectionGuardMissing) {
                     reportGuardTamper("Accessibility Guard disabled while financed protection is active");
                 } else if (limitGuardMissing) {
                     reportGuardTamper("Accessibility Guard disabled while Limit is active");
-                } else {
-                    DeviceControls.applyPolicyFromBackground(this, policy);
                 }
+                DeviceControls.applyPolicyFromBackground(this, policy);
             } catch (Exception ignored) {
                 enforceLastKnownPolicy();
             } finally {
@@ -117,10 +118,13 @@ public class AgentSyncService extends Service {
         Policy policy = KismartApi.lastPolicy(this);
         if (policy == null) return;
         boolean protectionGuardMissing = DeviceControls.enforceMissingProtectionGuard(this, policy);
-        boolean limitGuardMissing = !protectionGuardMissing && DeviceControls.enforceMissingLimitGuard(this, policy);
-        if (!protectionGuardMissing && !limitGuardMissing) {
-            DeviceControls.applyPolicyFromBackground(this, policy);
+        boolean limitGuardMissing = DeviceControls.enforceMissingLimitGuard(this, policy);
+        if (protectionGuardMissing) {
+            reportGuardTamper("Accessibility Guard disabled while financed protection is active");
+        } else if (limitGuardMissing) {
+            reportGuardTamper("Accessibility Guard disabled while Limit is active");
         }
+        DeviceControls.applyPolicyFromBackground(this, policy);
     }
 
     private void reportGuardTamper(String message) {
@@ -173,7 +177,7 @@ public class AgentSyncService extends Service {
                 : new Notification.Builder(this);
         return builder
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
-                .setContentTitle("KISMART Device Agent")
+                .setContentTitle("Device Service")
                 .setContentText(text)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
@@ -184,7 +188,7 @@ public class AgentSyncService extends Service {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
         NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
-                "KISMART policy monitor",
+                "Device service monitor",
                 NotificationManager.IMPORTANCE_LOW
         );
         NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);

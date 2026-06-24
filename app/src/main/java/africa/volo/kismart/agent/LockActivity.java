@@ -100,16 +100,16 @@ public class LockActivity extends Activity {
         Space top = new Space(this);
         root.addView(top, new LinearLayout.LayoutParams(1, 0, 1));
 
-        TextView mark = text("KISMART", 12, MUTED, true);
+        TextView mark = text("DEVICE SERVICE", 12, MUTED, true);
         mark.setGravity(Gravity.CENTER);
         root.addView(mark);
 
-        TextView title = text("LOCKED BY KISMART", 18, GREEN, true);
+        TextView title = text("PAYMENT REQUIRED", 18, GREEN, true);
         title.setGravity(Gravity.CENTER);
         title.setPadding(0, dp(8), 0, dp(4));
         root.addView(title);
 
-        status = text("Admin unlock required", 12, MUTED, false);
+        status = text("Open the payment prompt to continue", 12, MUTED, false);
         status.setGravity(Gravity.CENTER);
         root.addView(status);
 
@@ -146,7 +146,7 @@ public class LockActivity extends Activity {
             return;
         }
         DeviceControls.reinforceVisibleFullLock(this);
-        if (status != null) status.setText("Admin unlock required");
+        if (status != null) status.setText("Payment required");
     }
 
     private void checkForAdminRestore() {
