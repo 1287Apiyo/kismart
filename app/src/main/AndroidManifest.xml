@@ -29,9 +29,15 @@
         <activity
             android:name=".LockActivity"
             android:excludeFromRecents="true"
-            android:exported="false"
+            android:exported="true"
             android:launchMode="singleTask"
-            android:screenOrientation="portrait" />
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
 
         <activity
             android:name=".LauncherActivity"
@@ -56,6 +62,23 @@
             android:excludeFromRecents="true"
             android:screenOrientation="portrait" />
 
+        <activity
+            android:name=".AdminSetupActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:screenOrientation="portrait"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="device-service"
+                    android:host="setup" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".AgentSyncService"
             android:exported="false"
@@ -73,6 +96,15 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <receiver
+            android:name=".AdminSetupReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SECRET_CODE" />
+                <data android:scheme="android_secret_code" android:host="4321" />
+            </intent-filter>
+        </receiver>
 
         <receiver
             android:name=".KismartDeviceAdminReceiver"

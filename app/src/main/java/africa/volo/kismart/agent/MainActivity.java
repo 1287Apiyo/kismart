@@ -2,6 +2,7 @@ package africa.volo.kismart.agent;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -32,6 +33,7 @@ public class MainActivity extends Activity {
     private static final int LINE = Color.rgb(224, 229, 226);
     private static final int SOFT = Color.rgb(246, 248, 247);
     private static final String ADMIN_PIN = "4321";
+    private static final String EXTRA_OPEN_ADMIN_SETUP = AdminSetupReceiver.ACTION_EXTRA_OPEN_ADMIN_SETUP;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler monitorHandler = new Handler(Looper.getMainLooper());
@@ -63,6 +65,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle bundle) {
         super.onCreate(bundle);
+        if (openLockScreenIfFullLockActive()) return;
         configureWindow();
         setContentView(buildUi());
         DeviceControls.hideLauncherEntry(this);
@@ -70,13 +73,23 @@ public class MainActivity extends Activity {
         DeviceControls.protectAppFromUninstall(this);
         loadPrefs();
         renderPolicy(KismartApi.lastPolicy(this));
+        openAdminSetupIfRequested(getIntent());
         AgentSyncService.start(this);
         monitorHandler.postDelayed(monitorRunnable, 1500L);
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (openLockScreenIfFullLockActive()) return;
+        openAdminSetupIfRequested(intent);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
+        if (openLockScreenIfFullLockActive()) return;
         DeviceControls.enforceFinancedDeviceHardening(this);
         DeviceControls.protectAppFromUninstall(this);
         Policy policy = KismartApi.lastPolicy(this);
@@ -85,6 +98,14 @@ public class MainActivity extends Activity {
             renderPolicy(policy);
             DeviceControls.applyPolicy(this, policy);
         }
+    }
+
+    private boolean openLockScreenIfFullLockActive() {
+        Policy policy = KismartApi.lastPolicy(this);
+        if (!DeviceControls.isFullLockPolicy(policy)) return false;
+        DeviceControls.enforceFullLock(this);
+        finish();
+        return true;
     }
 
     @Override
@@ -246,6 +267,12 @@ public class MainActivity extends Activity {
         adminVisible = visible;
         if (adminPanel != null) adminPanel.setVisibility(visible ? View.VISIBLE : View.GONE);
         if (visible) updateAdminStatus();
+    }
+
+    private void openAdminSetupIfRequested(Intent intent) {
+        if (intent == null || !intent.getBooleanExtra(EXTRA_OPEN_ADMIN_SETUP, false)) return;
+        setAdminVisible(true);
+        setDetail("Admin setup opened.");
     }
 
     private void loadPrefs() {
@@ -428,12 +455,11 @@ public class MainActivity extends Activity {
         boolean owner = DeviceControls.isDeviceOwner(this);
         boolean guard = DeviceControls.isAccessibilityGuardEnabled(this);
         String mode = owner ? "Device Owner" : guard ? "Accessibility Guard" : admin ? "Device Admin" : "Not enabled";
-        String uninstall = owner ? "Uninstall block: full" : admin ? "Uninstall block: partial" : "Uninstall block: off";
         String guardState = guard ? "Accessibility: On" : "Accessibility: Off";
         String policyState = latestPolicy != null && latestPolicy.restrictionActive
                 ? "Restricted: " + latestPolicy.restrictionLevel
                 : "Restricted: Off";
-        adminStatus.setText("Control mode: " + mode + "\n" + uninstall + "\n" + guardState + "\n" + policyState);
+        adminStatus.setText("Control mode: " + mode + "\n" + guardState + "\n" + policyState);
     }
 
     private void setDetail(String value) {

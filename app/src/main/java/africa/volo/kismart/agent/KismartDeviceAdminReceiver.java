@@ -30,8 +30,7 @@ public class KismartDeviceAdminReceiver extends DeviceAdminReceiver {
 
     @Override
     public String onDisableRequested(Context context, Intent intent) {
-        // Prevent disabling this device admin
-        return "This device manager cannot be disabled while the phone is financed. Contact the administrator to remove protection.";
+        return null;
     }
 
     private void restartProtection(Context context) {

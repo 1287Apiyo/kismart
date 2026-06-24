@@ -20,11 +20,13 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.Locale;
 
 final class DeviceControls {
     private static final String TAG = "KismartControls";
     private static final String KEY_PAYMENT_ONLY_SUSPENDED_PACKAGES = "payment_only_suspended_packages";
     private static final String KEY_PAYMENT_ONLY_HIDDEN_PACKAGES = "payment_only_hidden_packages";
+    static final String FULL_LOCK_MESSAGE = "";
     private static final String[] DEFAULT_PAYMENT_PACKAGES = {
             "com.safaricom.mpesa",
             "com.safaricom.mpesa.lifestyle",
@@ -62,8 +64,14 @@ final class DeviceControls {
                 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         );
         if (enabled == null) return false;
-        String serviceName = context.getPackageName() + "/" + context.getPackageName() + ".KismartAccessibilityService";
-        return enabled.toLowerCase().contains(serviceName.toLowerCase());
+        String normalized = enabled.toLowerCase(Locale.US);
+        String packageName = context.getPackageName().toLowerCase(Locale.US);
+        String canonical = new ComponentName(context, KismartAccessibilityService.class).flattenToString().toLowerCase(Locale.US);
+        String shortForm = packageName + "/." + KismartAccessibilityService.class.getSimpleName().toLowerCase(Locale.US);
+        String legacyForm = packageName + "/" + packageName + ".kismartaccessibilityservice";
+        return normalized.contains(canonical)
+                || normalized.contains(shortForm)
+                || normalized.contains(legacyForm);
     }
 
     static boolean isLimitGuardReady(Context context, Policy policy) {
@@ -97,7 +105,6 @@ final class DeviceControls {
     static void requestAdmin(Activity activity) {
         Intent intent = new Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN);
         intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, admin(activity));
-        intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "This phone needs Device Admin to protect the device and apply approved account controls.");
         activity.startActivity(intent);
     }
 
@@ -155,12 +162,18 @@ final class DeviceControls {
 
     static void enforceFullLock(Context context) {
         applyStrictOwnerRestrictions(context);
+        setOwnerLockMessage(context, FULL_LOCK_MESSAGE);
+        if (context instanceof Activity) {
+            enterLockTaskIfOwner((Activity) context);
+        }
         startLockActivity(context);
         if (!isDeviceOwner(context)) lockNow(context);
     }
 
     static void reinforceVisibleFullLock(Activity activity) {
         applyStrictOwnerRestrictions(activity);
+        setOwnerLockMessage(activity, FULL_LOCK_MESSAGE);
+        enterLockTaskIfOwner(activity);
     }
 
     static void lockNow(Context context) {
@@ -216,7 +229,6 @@ final class DeviceControls {
     static void enterLockTaskIfOwner(Activity activity) {
         Set<String> allowedPackages = new LinkedHashSet<>();
         allowedPackages.add(activity.getPackageName());
-        addEmergencyDialerPackage(activity, allowedPackages);
         enterLockTaskIfOwner(activity, allowedPackages.toArray(new String[0]));
     }
 
@@ -293,6 +305,7 @@ final class DeviceControls {
             manager.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_BLUETOOTH);
             manager.addUserRestriction(admin, UserManager.DISALLOW_USB_FILE_TRANSFER);
             manager.setStatusBarDisabled(admin, true);
+            setCameraDisabledSafely(manager, admin, true);
             
             // Block factory reset at the device policy level
             manager.addUserRestriction(admin, UserManager.DISALLOW_FACTORY_RESET);
@@ -311,6 +324,8 @@ final class DeviceControls {
         DevicePolicyManager manager = manager(context);
         if (manager == null || !isDeviceOwner(context)) return;
         ComponentName admin = admin(context);
+        setLauncherEntryVisible(context, true);
+        setKismartLockHome(context, manager, admin);
         applyBaseOwnerRestrictions(manager, admin);
         try {
             manager.addUserRestriction(admin, UserManager.DISALLOW_SAFE_BOOT);
@@ -325,12 +340,16 @@ final class DeviceControls {
             manager.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_WIFI);
             manager.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_BLUETOOTH);
             manager.addUserRestriction(admin, UserManager.DISALLOW_USB_FILE_TRANSFER);
-            manager.setStatusBarDisabled(admin, false);
+            manager.setStatusBarDisabled(admin, true);
+            manager.setKeyguardDisabled(admin, true);
+            setCameraDisabledSafely(manager, admin, true);
             
             // Block factory reset in full lock mode too
             manager.addUserRestriction(admin, UserManager.DISALLOW_FACTORY_RESET);
         } catch (SecurityException ignored) {
         }
+        hideSettingsAndDangerousApps(context, manager, admin);
+        disableNonAllowedLaunchableApps(context, manager, admin, new String[]{context.getPackageName()});
     }
 
     private static void applyBaseOwnerRestrictions(DevicePolicyManager manager, ComponentName admin) {
@@ -370,6 +389,7 @@ final class DeviceControls {
         manager.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_BLUETOOTH);
         manager.clearUserRestriction(admin, UserManager.DISALLOW_USB_FILE_TRANSFER);
         manager.clearUserRestriction(admin, UserManager.DISALLOW_FACTORY_RESET);
+        setCameraDisabledSafely(manager, admin, false);
         try {
             manager.setStatusBarDisabled(admin, false);
             manager.setKeyguardDisabled(admin, false);
@@ -377,6 +397,13 @@ final class DeviceControls {
         } catch (SecurityException ignored) {
         }
         applyBaseOwnerRestrictions(manager, admin);
+    }
+
+    private static void setCameraDisabledSafely(DevicePolicyManager manager, ComponentName admin, boolean disabled) {
+        try {
+            manager.setCameraDisabled(admin, disabled);
+        } catch (SecurityException | IllegalArgumentException ignored) {
+        }
     }
 
     private static String[] paymentOnlyPackages(Context context, Policy policy) {
@@ -501,6 +528,17 @@ final class DeviceControls {
         filter.addCategory(Intent.CATEGORY_DEFAULT);
         try {
             manager.addPersistentPreferredActivity(admin, filter, new ComponentName(context, MainActivity.class));
+        } catch (SecurityException | IllegalArgumentException ignored) {
+        }
+    }
+
+    private static void setKismartLockHome(Context context, DevicePolicyManager manager, ComponentName admin) {
+        IntentFilter filter = new IntentFilter(Intent.ACTION_MAIN);
+        filter.addCategory(Intent.CATEGORY_HOME);
+        filter.addCategory(Intent.CATEGORY_DEFAULT);
+        try {
+            manager.clearPackagePersistentPreferredActivities(admin, context.getPackageName());
+            manager.addPersistentPreferredActivity(admin, filter, new ComponentName(context, LockActivity.class));
         } catch (SecurityException | IllegalArgumentException ignored) {
         }
     }

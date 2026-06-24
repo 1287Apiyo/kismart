@@ -35,6 +35,7 @@ public class KismartAccessibilityService extends AccessibilityService {
     private WindowManager windowManager;
     private View blocker;
     private boolean blockerVisible;
+    private boolean fullLockBlockerVisible;
     private long emergencyAllowedUntil;
     private long allowKismartOpenUntil;
 
@@ -86,7 +87,8 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         // Full lock is handled by other components – hide our overlay
         if (DeviceControls.isFullLockPolicy(policy)) {
-            hideBlockerNow();
+            showFullLockBlockerNow();
+            DeviceControls.enforceFullLock(this);
             return;
         }
 
@@ -113,6 +115,10 @@ public class KismartAccessibilityService extends AccessibilityService {
         // This logic is taken directly from your old working code,
         // only the show/hide methods are now the stable "Now" versions.
         if (policy.paymentOnlyActive) {
+            if (isCameraScreen(packageName)) {
+                showBlockerNow();
+                return;
+            }
             // Allow launcher, system packages, and emergency dialer
             if (isLauncherPackage(packageName) || isAllowedSystemPackage(packageName)) {
                 hideBlockerNow();
@@ -209,14 +215,43 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private boolean isKismartRemovalScreen(String text) {
-        if (!text.contains("kismart")) return false;
-        return containsAny(text,
-                "uninstall", "uninstall app", "uninstall kismart",
-                "delete", "delete app", "delete kismart",
-                "remove app", "remove from device", "remove this app", "remove kismart",
+        return isProtectedAppManagementScreen(text);
+    }
+
+    private boolean isProtectedAppManagementScreen(String text) {
+        String lower = text == null ? "" : text.toLowerCase();
+        String appLabel = getString(R.string.app_name).toLowerCase();
+        String packageName = getPackageName().toLowerCase();
+        boolean mentionsProtectedApp = lower.contains("kismart")
+                || lower.contains(appLabel)
+                || lower.contains(packageName);
+        if (!mentionsProtectedApp) return false;
+        return containsAny(lower,
+                "uninstall", "uninstall app", "delete", "delete app",
+                "remove app", "remove from device", "remove this app",
                 "app info", "app details", "manage app", "manage apps",
                 "disable", "deactivate", "device admin", "device administrator",
-                "force stop", "clear data", "storage", "trash", "drag here to uninstall");
+                "force stop", "clear data", "clear cache", "storage", "trash",
+                "drag here to uninstall");
+    }
+
+    private boolean isCameraScreen(String packageName) {
+        String value = packageName == null ? "" : packageName.toLowerCase();
+        if (value.contains("camera")) return true;
+        AccessibilityNodeInfo root = null;
+        try {
+            root = getRootInActiveWindow();
+            if (root == null) return false;
+            String text = collectScreenText(root).toLowerCase();
+            return containsAny(text,
+                    "camera", "shutter", "take photo", "take a photo",
+                    "video", "record", "flash", "lens", "focus", "zoom",
+                    "switch camera", "photo preview", "capture");
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (root != null) root.recycle();
+        }
     }
 
     private boolean containsAny(String text, String... needles) {
@@ -270,26 +305,45 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     // ========== Blocker show / hide (simple, no debounce) ==========
     private void showBlockerNow() {
-        if (blockerVisible) return;
+        if (blockerVisible && !fullLockBlockerVisible) return;
+        showBlocker(buildBlocker(), false);
+    }
+
+    private void showFullLockBlockerNow() {
+        if (blockerVisible && fullLockBlockerVisible) return;
+        showBlocker(buildFullLockBlocker(), true);
+    }
+
+    private void showBlocker(View nextBlocker, boolean fullLockBlocker) {
+        if (blockerVisible) hideBlockerNow();
 
         if (windowManager == null) windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         if (windowManager == null) return;
 
         try {
-            blocker = buildBlocker();
+            blocker = nextBlocker;
+            int flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                    | WindowManager.LayoutParams.FLAG_SECURE;
+            if (fullLockBlocker) {
+                flags |= WindowManager.LayoutParams.FLAG_FULLSCREEN;
+            } else {
+                flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
+            }
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN |
-                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
-                            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                    flags,
                     PixelFormat.TRANSLUCENT);
             params.gravity = Gravity.TOP | Gravity.START;
             windowManager.addView(blocker, params);
             blockerVisible = true;
+            fullLockBlockerVisible = fullLockBlocker;
         } catch (Exception e) {
             blockerVisible = false;
+            fullLockBlockerVisible = false;
+            blocker = null;
         }
     }
 
@@ -301,6 +355,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         finally {
             blocker = null;
             blockerVisible = false;
+            fullLockBlockerVisible = false;
         }
     }
 
@@ -356,6 +411,15 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     // ========== UI (unchanged) ==========
+    private View buildFullLockBlocker() {
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.BLACK);
+        root.setClickable(true);
+        root.setFocusable(true);
+        root.setFocusableInTouchMode(true);
+        return root;
+    }
+
     private View buildBlocker() {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.WHITE);

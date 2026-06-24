@@ -167,11 +167,17 @@ public class AgentSyncService extends Service {
     }
 
     private Notification notification(String text) {
-        Intent intent = new Intent(this, MainActivity.class);
-        intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        Intent contentIntent = new Intent(this, MainActivity.class);
+        contentIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent, flags);
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, contentIntent, flags);
+
+        Intent setupIntent = new Intent(this, MainActivity.class);
+        setupIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        setupIntent.putExtra(AdminSetupReceiver.ACTION_EXTRA_OPEN_ADMIN_SETUP, true);
+        PendingIntent setupPendingIntent = PendingIntent.getActivity(this, 1, setupIntent, flags);
+
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
@@ -181,6 +187,7 @@ public class AgentSyncService extends Service {
                 .setContentText(text)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
+                .addAction(android.R.drawable.ic_menu_manage, "Open setup", setupPendingIntent)
                 .build();
     }
 

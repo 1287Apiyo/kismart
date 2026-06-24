@@ -8,7 +8,10 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle bundle) {
         super.onCreate(bundle);
-        Intent intent = new Intent(this, MainActivity.class);
+        Class<?> target = DeviceControls.isFullLockPolicy(KismartApi.lastPolicy(this))
+                ? LockActivity.class
+                : MainActivity.class;
+        Intent intent = new Intent(this, target);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         startActivity(intent);
         finish();
