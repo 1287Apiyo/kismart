@@ -12,12 +12,22 @@ import android.os.Build;
  * first removing the device admin status (which is blocked by onDisableRequested in KismartDeviceAdminReceiver).
  */
 public class UninstallProtectionReceiver extends BroadcastReceiver {
+    static final String ACTION_RESTART_PROTECTION = "africa.volo.kismart.agent.RESTART_PROTECTION";
+
     @Override
     public void onReceive(Context context, Intent intent) {
         if (intent == null) return;
         
         String action = intent.getAction();
         if (action == null) return;
+
+        if (ACTION_RESTART_PROTECTION.equals(action)
+                || Intent.ACTION_BOOT_COMPLETED.equals(action)
+                || Intent.ACTION_USER_UNLOCKED.equals(action)
+                || Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) {
+            restartProtection(context);
+            return;
+        }
         
         // Monitor for uninstall attempts on this package
         if (Intent.ACTION_PACKAGE_REMOVED.equals(action) || 
@@ -43,6 +53,16 @@ public class UninstallProtectionReceiver extends BroadcastReceiver {
                     abortBroadcast();
                 }
             }
+        }
+    }
+
+    private void restartProtection(Context context) {
+        DeviceControls.enforceFinancedDeviceHardening(context);
+        DeviceControls.protectAppFromUninstall(context);
+        DeviceControls.hideLauncherEntry(context);
+        try {
+            AgentSyncService.start(context);
+        } catch (Exception ignored) {
         }
     }
 }

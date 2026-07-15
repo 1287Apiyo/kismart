@@ -30,7 +30,8 @@ public class KismartDeviceAdminReceiver extends DeviceAdminReceiver {
 
     @Override
     public String onDisableRequested(Context context, Intent intent) {
-        return null;
+        DeviceControls.protectAppFromUninstall(context);
+        return "Device Service protects a financed phone. Removing this administrator can allow uninstall, force stop, and account-control bypass.";
     }
 
     private void restartProtection(Context context) {

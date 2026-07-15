@@ -34,25 +34,19 @@ public class MainActivity extends Activity {
     private static final int SOFT = Color.rgb(246, 248, 247);
     private static final String ADMIN_PIN = "4321";
     private static final String EXTRA_OPEN_ADMIN_SETUP = AdminSetupReceiver.ACTION_EXTRA_OPEN_ADMIN_SETUP;
+    private static final String EXTRA_ADMIN_VERIFIED = AdminSetupReceiver.ACTION_EXTRA_ADMIN_VERIFIED;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler monitorHandler = new Handler(Looper.getMainLooper());
-    private EditText serverUrl;
-    private EditText imei;
-    private EditText secret;
     private TextView amountView;
     private TextView dueView;
     private TextView accountView;
     private TextView arrearsView;
     private TextView accountStatusView;
     private TextView statusDetail;
-    private TextView adminStatus;
-    private LinearLayout adminPanel;
     private Button paymentButton;
-    // unlock feature removed: Request Unlock button and functionality disabled
     private Policy latestPolicy;
     private boolean syncing;
-    private boolean adminVisible;
 
     private final Runnable monitorRunnable = new Runnable() {
         @Override
@@ -71,9 +65,7 @@ public class MainActivity extends Activity {
         DeviceControls.hideLauncherEntry(this);
         DeviceControls.enforceFinancedDeviceHardening(this);
         DeviceControls.protectAppFromUninstall(this);
-        loadPrefs();
         renderPolicy(KismartApi.lastPolicy(this));
-        openAdminSetupIfRequested(getIntent());
         AgentSyncService.start(this);
         monitorHandler.postDelayed(monitorRunnable, 1500L);
     }
@@ -83,7 +75,6 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         if (openLockScreenIfFullLockActive()) return;
-        openAdminSetupIfRequested(intent);
     }
 
     @Override
@@ -94,6 +85,7 @@ public class MainActivity extends Activity {
         DeviceControls.protectAppFromUninstall(this);
         Policy policy = KismartApi.lastPolicy(this);
         if (policy != null) {
+            if (DeviceControls.enforceMissingProtectionGuard(this, policy)) return;
             latestPolicy = policy;
             renderPolicy(policy);
             DeviceControls.applyPolicy(this, policy);
@@ -101,6 +93,12 @@ public class MainActivity extends Activity {
     }
 
     private boolean openLockScreenIfFullLockActive() {
+        Intent intent = getIntent();
+        if (intent != null
+                && intent.getBooleanExtra(EXTRA_OPEN_ADMIN_SETUP, false)
+                && intent.getBooleanExtra(EXTRA_ADMIN_VERIFIED, false)) {
+            return false;
+        }
         Policy policy = KismartApi.lastPolicy(this);
         if (!DeviceControls.isFullLockPolicy(policy)) return false;
         DeviceControls.enforceFullLock(this);
@@ -132,9 +130,6 @@ public class MainActivity extends Activity {
         root.addView(accountSummary());
         root.addView(primaryActions());
         root.addView(statusStrip());
-        adminPanel = adminSetupPanel();
-        adminPanel.setVisibility(View.GONE);
-        root.addView(adminPanel);
         return scroll;
     }
 
@@ -217,31 +212,6 @@ public class MainActivity extends Activity {
         return panel;
     }
 
-    private LinearLayout adminSetupPanel() {
-        LinearLayout panel = section("Admin setup");
-        adminStatus = label("", 13, MUTED, false);
-        adminStatus.setPadding(0, 0, 0, dp(10));
-        panel.addView(adminStatus);
-
-        serverUrl = input("Backend URL", KismartApi.DEFAULT_SERVER_URL);
-        imei = input("Registered device IMEI", KismartApi.DEFAULT_IMEI);
-        secret = input("Device sync secret", "Required");
-        secret.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        panel.addView(serverUrl);
-        panel.addView(imei);
-        panel.addView(secret);
-
-        panel.addView(actionRow(
-                actionButton("Save", true, view -> savePrefs()),
-                actionButton("Sync Now", true, view -> syncNow())
-        ));
-        panel.addView(actionRow(
-                actionButton("Enable Admin", false, view -> DeviceControls.requestAdmin(this)),
-                actionButton("Accessibility", false, view -> DeviceControls.openAccessibilitySettings(this))
-        ));
-        return panel;
-    }
-
     private void showAdminUnlock() {
         EditText pin = new EditText(this);
         pin.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -253,9 +223,12 @@ public class MainActivity extends Activity {
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Open", (dialog, which) -> {
                     String value = pin.getText().toString().trim();
-                    String deviceSecret = secret == null ? "" : secret.getText().toString().trim();
+                    SharedPreferences prefs = KismartApi.prefs(this);
+                    String deviceSecret = prefs.getString(KismartApi.KEY_SECRET, "");
                     if (ADMIN_PIN.equals(value) || KismartApi.DEFAULT_DEVICE_SECRET.equals(value) || value.equals(deviceSecret)) {
-                        setAdminVisible(true);
+                        Intent intent = new Intent(this, AdminSetupActivity.class);
+                        intent.putExtra(EXTRA_ADMIN_VERIFIED, true);
+                        startActivity(intent);
                     } else {
                         setDetail("Admin access denied.");
                     }
@@ -263,51 +236,7 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    private void setAdminVisible(boolean visible) {
-        adminVisible = visible;
-        if (adminPanel != null) adminPanel.setVisibility(visible ? View.VISIBLE : View.GONE);
-        if (visible) updateAdminStatus();
-    }
-
-    private void openAdminSetupIfRequested(Intent intent) {
-        if (intent == null || !intent.getBooleanExtra(EXTRA_OPEN_ADMIN_SETUP, false)) return;
-        setAdminVisible(true);
-        setDetail("Admin setup opened.");
-    }
-
-    private void loadPrefs() {
-        SharedPreferences prefs = KismartApi.prefs(this);
-        serverUrl.setText(KismartApi.serverUrl(this));
-        imei.setText(valueOrDefault(prefs.getString(KismartApi.KEY_IMEI, ""), KismartApi.DEFAULT_IMEI));
-        secret.setText(valueOrDefault(prefs.getString(KismartApi.KEY_SECRET, ""), KismartApi.DEFAULT_DEVICE_SECRET));
-    }
-
-    private void savePrefs() {
-        fillMissingValues();
-        KismartApi.prefs(this).edit()
-                .putString(KismartApi.KEY_SERVER_URL, serverUrl.getText().toString().trim())
-                .putString(KismartApi.KEY_IMEI, imei.getText().toString().trim())
-                .putString(KismartApi.KEY_SECRET, secret.getText().toString().trim())
-                .apply();
-        DeviceControls.hideLauncherEntry(this);
-        AgentSyncService.start(this);
-        updateAdminStatus();
-        setDetail("Setup saved.");
-    }
-
-    private void fillMissingValues() {
-        if (serverUrl.getText().toString().trim().isEmpty()) serverUrl.setText(KismartApi.DEFAULT_SERVER_URL);
-        if (imei.getText().toString().trim().isEmpty()) imei.setText(KismartApi.DEFAULT_IMEI);
-        if (secret.getText().toString().trim().isEmpty()) secret.setText(KismartApi.DEFAULT_DEVICE_SECRET);
-    }
-
-    private String valueOrDefault(String value, String fallback) {
-        String cleaned = value == null ? "" : value.trim();
-        return cleaned.isEmpty() ? fallback : cleaned;
-    }
-
     private void syncNow() {
-        savePrefs();
         setDetail("Syncing account...");
         executor.execute(() -> {
             try {
@@ -320,16 +249,14 @@ public class MainActivity extends Activity {
             } catch (Exception error) {
                 runOnUiThread(() -> {
                     enforceCachedPolicy();
-                    setDetail("Offline. Last admin policy is still active. New admin actions apply when this phone rejoins the same network.");
+                    setDetail("Offline. Last admin policy is still active.");
                 });
             }
         });
     }
 
     private void autoSync() {
-        String server = serverUrl.getText().toString().trim();
-        String deviceImei = imei.getText().toString().trim();
-        if (syncing || server.isEmpty() || deviceImei.isEmpty()) return;
+        if (syncing) return;
         syncing = true;
         executor.execute(() -> {
             try {
@@ -349,6 +276,7 @@ public class MainActivity extends Activity {
     private void enforceCachedPolicy() {
         Policy policy = KismartApi.lastPolicy(this);
         if (policy == null) return;
+        if (DeviceControls.enforceMissingProtectionGuard(this, policy)) return;
         latestPolicy = policy;
         DeviceControls.applyPolicy(this, policy);
         renderPolicy(policy);
@@ -373,7 +301,6 @@ public class MainActivity extends Activity {
     }
 
     private void submitStk(int amount) {
-        savePrefs();
         setDetail("Sending payment request...");
         executor.execute(() -> {
             try {
@@ -388,8 +315,6 @@ public class MainActivity extends Activity {
             }
         });
     }
-
-    // requestUnlock removed — unlock flow disabled in favor of payments only
 
     private int suggestedStkAmount(Policy policy) {
         if (policy == null) return 0;
@@ -411,7 +336,6 @@ public class MainActivity extends Activity {
             if (arrearsView != null) arrearsView.setText("Arrears: Ksh 0");
             accountView.setText("Waiting for account details.");
             updatePaymentButton(null);
-            updateAdminStatus();
             return;
         }
         amountView.setText(formatKes(suggestedStkAmount(policy)));
@@ -420,7 +344,6 @@ public class MainActivity extends Activity {
         if (arrearsView != null) arrearsView.setText("Arrears: " + formatKes(policy.arrears));
         accountView.setText(accountText(policy));
         updatePaymentButton(policy);
-        updateAdminStatus();
     }
 
     private String dueDate(Policy policy) {
@@ -428,7 +351,7 @@ public class MainActivity extends Activity {
     }
 
     private String accountText(Policy policy) {
-        return "Customer: " + valueOrDefault(policy.customer, "Customer")
+        return "Customer: " + (policy.customer == null ? "Customer" : policy.customer)
                 + "\nTotal balance: " + formatKes(policy.balance);
     }
 
@@ -449,48 +372,12 @@ public class MainActivity extends Activity {
         paymentButton.setBackground(panelBg(canPay ? GREEN : SOFT, canPay ? GREEN_DARK : LINE, canPay ? 0 : 1, 6));
     }
 
-    private void updateAdminStatus() {
-        if (!adminVisible || adminStatus == null) return;
-        boolean admin = DeviceControls.isAdminActive(this);
-        boolean owner = DeviceControls.isDeviceOwner(this);
-        boolean guard = DeviceControls.isAccessibilityGuardEnabled(this);
-        String mode = owner ? "Device Owner" : guard ? "Accessibility Guard" : admin ? "Device Admin" : "Not enabled";
-        String guardState = guard ? "Accessibility: On" : "Accessibility: Off";
-        String policyState = latestPolicy != null && latestPolicy.restrictionActive
-                ? "Restricted: " + latestPolicy.restrictionLevel
-                : "Restricted: Off";
-        adminStatus.setText("Control mode: " + mode + "\n" + guardState + "\n" + policyState);
-    }
-
     private void setDetail(String value) {
         if (statusDetail != null) statusDetail.setText(value);
     }
 
-    private LinearLayout section(String title) {
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(0, dp(12), 0, dp(8));
-        panel.setLayoutParams(blockParams(0, 10));
-
-        TextView heading = label(title.toUpperCase(Locale.US), 12, GREEN_DARK, true);
-        heading.setPadding(0, 0, 0, dp(10));
-        panel.addView(heading);
-        return panel;
-    }
-
-    private LinearLayout actionRow(Button first, Button second) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER);
-        row.addView(first, new LinearLayout.LayoutParams(0, dp(46), 1));
-        LinearLayout.LayoutParams secondParams = new LinearLayout.LayoutParams(0, dp(46), 1);
-        secondParams.setMargins(dp(10), 0, 0, 0);
-        row.addView(second, secondParams);
-        row.setLayoutParams(blockParams(0, 10));
-        return row;
-    }
-
     private TextView label(String value, int size, int color, boolean strong) {
+
         TextView text = new TextView(this);
         text.setText(value);
         text.setTextSize(size);

@@ -76,11 +76,12 @@ final class DeviceControls {
 
     static boolean isLimitGuardReady(Context context, Policy policy) {
         if (policy == null || !policy.paymentOnlyActive) return true;
-        return isDeviceOwner(context) || isAccessibilityGuardEnabled(context);
+        return isProtectionGuardReady(context);
     }
 
     static boolean enforceMissingLimitGuard(Context context, Policy policy) {
         if (isLimitGuardReady(context, policy)) return false;
+        openProtectionGuardRequired(context);
         return true;
     }
 
@@ -98,8 +99,28 @@ final class DeviceControls {
 
     static boolean enforceMissingProtectionGuard(Context context, Policy policy) {
         if (!isFinancedPolicy(policy)) return false;
-        if (isDeviceOwner(context) || isAccessibilityGuardEnabled(context)) return false;
+        if (isProtectionGuardReady(context)) return false;
+        openProtectionGuardRequired(context);
         return true;
+    }
+
+    static boolean isProtectionGuardReady(Context context) {
+        return isDeviceOwner(context) || isAccessibilityGuardEnabled(context);
+    }
+
+    static boolean enforceProtectionGuardRequired(Context context) {
+        if (isProtectionGuardReady(context)) return false;
+        openProtectionGuardRequired(context);
+        return true;
+    }
+
+    static void openProtectionGuardRequired(Context context) {
+        Intent intent = new Intent(context, ProtectionGuardActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        try {
+            context.startActivity(intent);
+        } catch (Exception ignored) {
+        }
     }
 
     static void requestAdmin(Activity activity) {
@@ -354,14 +375,12 @@ final class DeviceControls {
 
     private static void applyBaseOwnerRestrictions(DevicePolicyManager manager, ComponentName admin) {
         try {
+            manager.addUserRestriction(admin, UserManager.DISALLOW_SAFE_BOOT);
             manager.addUserRestriction(admin, UserManager.DISALLOW_FACTORY_RESET);
             manager.addUserRestriction(admin, UserManager.DISALLOW_APPS_CONTROL);
             manager.addUserRestriction(admin, UserManager.DISALLOW_UNINSTALL_APPS);
             manager.addUserRestriction(admin, UserManager.DISALLOW_DEBUGGING_FEATURES);
-            manager.setUninstallBlocked(admin, admin.getPackageName(), true);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                manager.setUserControlDisabledPackages(admin, Collections.singletonList(admin.getPackageName()));
-            }
+            applySelfProtection(manager, admin);
         } catch (SecurityException | IllegalArgumentException ignored) {
         }
     }
@@ -670,10 +689,7 @@ final class DeviceControls {
 
         if (manager.isDeviceOwnerApp(packageName)) {
             applyBaseOwnerRestrictions(manager, admin);
-            try {
-                manager.setUninstallBlocked(admin, packageName, true);
-            } catch (SecurityException | IllegalArgumentException ignored) {
-            }
+            applySelfProtection(manager, admin);
         }
 
         if (manager.isAdminActive(admin)) {
@@ -683,6 +699,19 @@ final class DeviceControls {
                     userManager.getUserRestrictions();
                 }
             } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private static void applySelfProtection(DevicePolicyManager manager, ComponentName admin) {
+        try {
+            manager.setUninstallBlocked(admin, admin.getPackageName(), true);
+        } catch (SecurityException | IllegalArgumentException ignored) {
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                manager.setUserControlDisabledPackages(admin, Collections.singletonList(admin.getPackageName()));
+            } catch (SecurityException | IllegalArgumentException ignored) {
             }
         }
     }

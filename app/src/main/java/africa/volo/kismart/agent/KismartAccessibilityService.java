@@ -13,6 +13,7 @@ import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -63,6 +64,10 @@ public class KismartAccessibilityService extends AccessibilityService {
     public void onDestroy() {
         handler.removeCallbacks(watchdog);
         hideBlockerNow();
+        try {
+            AgentSyncService.start(this);
+        } catch (Exception ignored) {
+        }
         super.onDestroy();
     }
 
@@ -79,6 +84,24 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     // ========== Main decision logic ==========
     private void checkBlockerState() {
+        String packageName = activePackageName();
+        if (packageName.isEmpty()) {
+            hideBlockerNow();
+            return;
+        }
+
+        // Never block KISMART itself
+        if (getPackageName().equals(packageName)) {
+            hideBlockerNow();
+            return;
+        }
+
+        // Always protect KISMART's app-info/removal screens, even before policy sync.
+        if (isDangerousScreenNow(packageName)) {
+            showBlockerNow();
+            return;
+        }
+
         Policy policy = KismartApi.lastPolicy(this);
         if (policy == null) {
             hideBlockerNow();
@@ -94,19 +117,6 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         // No restriction active → hide
         if (!DeviceControls.isFinancedPolicy(policy) && !policy.paymentOnlyActive) {
-            hideBlockerNow();
-            return;
-        }
-
-        // Get current package
-        String packageName = activePackageName();
-        if (packageName.isEmpty()) {
-            hideBlockerNow();
-            return;
-        }
-
-        // Never block KISMART itself
-        if (getPackageName().equals(packageName)) {
             hideBlockerNow();
             return;
         }
@@ -162,7 +172,7 @@ public class KismartAccessibilityService extends AccessibilityService {
     private boolean isDangerousSettingsScreenContent() {
         AccessibilityNodeInfo root = null;
         try {
-            root = getRootInActiveWindow();
+            root = activeInspectionRoot();
             if (root == null) return false;
             String text = collectScreenText(root).toLowerCase();
             return isFactoryResetScreen(text)
@@ -179,7 +189,7 @@ public class KismartAccessibilityService extends AccessibilityService {
     private boolean isDangerousRemovalSurfaceContent() {
         AccessibilityNodeInfo root = null;
         try {
-            root = getRootInActiveWindow();
+            root = activeInspectionRoot();
             if (root == null) return false;
             String text = collectScreenText(root).toLowerCase();
             return isKismartRemovalScreen(text);
@@ -240,7 +250,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         if (value.contains("camera")) return true;
         AccessibilityNodeInfo root = null;
         try {
-            root = getRootInActiveWindow();
+            root = activeInspectionRoot();
             if (root == null) return false;
             String text = collectScreenText(root).toLowerCase();
             return containsAny(text,
@@ -327,8 +337,7 @@ public class KismartAccessibilityService extends AccessibilityService {
             if (fullLockBlocker) {
                 flags |= WindowManager.LayoutParams.FLAG_FULLSCREEN;
             } else {
-                flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
+                flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
             }
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT,
@@ -361,11 +370,34 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     // ========== Helpers (unchanged) ==========
     private String activePackageName() {
+        AccessibilityNodeInfo root = null;
         try {
-            AccessibilityNodeInfo root = getRootInActiveWindow();
+            root = activeInspectionRoot();
             if (root == null || root.getPackageName() == null) return "";
             return root.getPackageName().toString();
-        } catch (Exception ignored) { return ""; }
+        } catch (Exception ignored) {
+            return "";
+        } finally {
+            if (root != null) root.recycle();
+        }
+    }
+
+    private AccessibilityNodeInfo activeInspectionRoot() {
+        try {
+            for (AccessibilityWindowInfo window : getWindows()) {
+                if (window == null) continue;
+                if (window.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
+                AccessibilityNodeInfo root = window.getRoot();
+                if (root == null) continue;
+                CharSequence packageName = root.getPackageName();
+                if (packageName == null || !getPackageName().equals(packageName.toString())) {
+                    return root;
+                }
+                root.recycle();
+            }
+        } catch (Exception ignored) {
+        }
+        return getRootInActiveWindow();
     }
 
     private boolean isKismartLockScreen() {
