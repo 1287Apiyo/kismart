@@ -5,8 +5,6 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -29,13 +27,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final int BLACK = Color.rgb(14, 18, 16);
-    private static final int GREEN = Color.rgb(22, 163, 74);
-    private static final int GREEN_DARK = Color.rgb(21, 128, 61);
-    private static final int WHITE = Color.WHITE;
-    private static final int MUTED = Color.rgb(92, 99, 95);
-    private static final int LINE = Color.rgb(224, 229, 226);
-    private static final int SOFT = Color.rgb(246, 248, 247);
     private static final String ADMIN_PIN = "4321";
     private static final String EXTRA_OPEN_ADMIN_SETUP = AdminSetupReceiver.ACTION_EXTRA_OPEN_ADMIN_SETUP;
     private static final String EXTRA_ADMIN_VERIFIED = AdminSetupReceiver.ACTION_EXTRA_ADMIN_VERIFIED;
@@ -45,8 +36,10 @@ public class MainActivity extends Activity {
     private final Runnable paymentPollRunnable = this::pollPaymentStatus;
     private TextView amountView;
     private TextView dueView;
-    private TextView accountView;
-    private TextView arrearsView;
+    private LinearLayout customerValue;
+    private LinearLayout phoneValue;
+    private LinearLayout balanceValue;
+    private TextView arrearsValue;
     private TextView accountStatusView;
     private TextView statusDetail;
     private Button paymentButton;
@@ -251,9 +244,7 @@ public class MainActivity extends Activity {
         if (!paymentPending) {
             int amount = suggestedStkAmount(latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this));
             if (amount > 0) {
-                paymentButton.setEnabled(true);
-                paymentButton.setTextColor(WHITE);
-                paymentButton.setBackground(panelBg(GREEN, GREEN_DARK, 0, 6));
+                UiTheme.stylePrimaryCta(paymentButton, this, true);
             }
         }
     }
@@ -284,18 +275,21 @@ public class MainActivity extends Activity {
     private View buildUi() {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(WHITE);
+        scroll.setBackgroundColor(UiTheme.SURFACE);
+        scroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(20), dp(20), dp(20), dp(24));
+        // Extra top inset so content sits below the status bar and does not feel cramped.
+        root.setPadding(dp(20), dp(32), dp(20), dp(32));
         scroll.addView(root, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT,
                 ScrollView.LayoutParams.WRAP_CONTENT
         ));
 
         root.addView(header());
-        root.addView(accountSummary());
+        root.addView(amountCard());
+        root.addView(accountCard());
         root.addView(primaryActions());
         root.addView(statusStrip());
         return scroll;
@@ -305,13 +299,10 @@ public class MainActivity extends Activity {
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(0, dp(2), 0, dp(18));
+        // More breathing room under the brand row before the first card.
+        header.setPadding(0, dp(4), 0, dp(28));
 
-        ImageView logo = new ImageView(this);
-        logo.setImageResource(R.drawable.logo);
-        logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        logo.setBackground(panelBg(SOFT, LINE, 1, 8));
-        logo.setContentDescription("KISMART");
+        ImageView logo = UiTheme.logo(this, 44);
         // Hidden admin path only when account is paid. While unpaid, only Pay via M-Pesa is allowed.
         logo.setOnLongClickListener(view -> {
             if (paymentLockActive()) {
@@ -322,73 +313,113 @@ public class MainActivity extends Activity {
             showAdminUnlock();
             return true;
         });
-        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(48), dp(48));
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(44), dp(44));
         logoParams.setMargins(0, 0, dp(12), 0);
         header.addView(logo, logoParams);
 
         LinearLayout copy = new LinearLayout(this);
         copy.setOrientation(LinearLayout.VERTICAL);
         header.addView(copy, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        copy.addView(label("My device account", 20, BLACK, true));
-        copy.addView(label("Payments and access status", 13, MUTED, false));
+        copy.addView(UiTheme.sectionLabel(this, "KISMART"));
+        TextView title = UiTheme.text(this, "Device account", 20, UiTheme.INK, true);
+        title.setPadding(0, dp(6), 0, dp(4));
+        copy.addView(title);
+        copy.addView(UiTheme.text(this, "Complete payment to restore full access", 13, UiTheme.MUTED, false));
         return header;
     }
 
-    private View accountSummary() {
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(16), dp(16), dp(16), dp(16));
-        panel.setBackground(panelBg(SOFT, LINE, 1, 8));
-        panel.setLayoutParams(blockParams(0, 14));
+    private View amountCard() {
+        LinearLayout panel = UiTheme.cardContainer(this);
+        panel.setLayoutParams(blockParams(0, 16));
 
-        panel.addView(label("Amount to pay now", 13, MUTED, false));
-        amountView = label("Ksh 0", 42, BLACK, true);
-        amountView.setPadding(0, dp(4), 0, dp(10));
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.addView(UiTheme.sectionLabel(this, "Amount due"), new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        accountStatusView = UiTheme.statusPill(this, "Syncing", true);
+        top.addView(accountStatusView);
+        panel.addView(top);
+
+        amountView = UiTheme.text(this, "Ksh 0", 36, UiTheme.INK, true);
+        amountView.setPadding(0, dp(14), 0, dp(8));
+        if (Build.VERSION.SDK_INT >= 21) amountView.setLetterSpacing(-0.02f);
         panel.addView(amountView);
 
-        dueView = label("Due date: Not synced", 15, BLACK, true);
-        dueView.setPadding(0, dp(2), 0, dp(8));
+        dueView = UiTheme.text(this, "Due date · Not synced", 14, UiTheme.MUTED, false);
+        dueView.setPadding(0, 0, 0, dp(6));
         panel.addView(dueView);
 
-        accountStatusView = label("Account status: Syncing", 14, GREEN_DARK, true);
-        accountStatusView.setPadding(0, 0, 0, dp(6));
-        panel.addView(accountStatusView);
-
-        arrearsView = label("Arrears: Ksh 0", 14, MUTED, false);
-        arrearsView.setPadding(0, 0, 0, dp(6));
-        panel.addView(arrearsView);
-
-        accountView = label("Waiting for account details.", 13, MUTED, false);
-        accountView.setLineSpacing(dp(2), 1.0f);
-        panel.addView(accountView);
+        arrearsValue = UiTheme.text(this, "Arrears · Ksh 0", 13, UiTheme.MUTED, false);
+        panel.addView(arrearsValue);
         return panel;
+    }
+
+    private View accountCard() {
+        LinearLayout panel = UiTheme.cardContainer(this);
+        // Space below account details before the pay button block.
+        panel.setLayoutParams(blockParams(0, 8));
+
+        panel.addView(UiTheme.sectionLabel(this, "Account details"));
+        panel.addView(spacer(10));
+
+        customerValue = metaLine("Customer", "—");
+        phoneValue = metaLine("M-Pesa phone", "—");
+        balanceValue = metaLine("Total balance", "Ksh 0");
+        panel.addView(customerValue);
+        panel.addView(UiTheme.hairline(this));
+        panel.addView(phoneValue);
+        panel.addView(UiTheme.hairline(this));
+        panel.addView(balanceValue);
+        return panel;
+    }
+
+    private LinearLayout metaLine(String label, String value) {
+        return UiTheme.metaRow(this, label, value);
     }
 
     private View primaryActions() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(0, dp(4), 0, dp(12));
-        // Allow children (Pay button) to receive taps without parent intercept.
+        // Clear vertical space around the primary CTA.
+        panel.setPadding(0, dp(20), 0, dp(20));
         panel.setClickable(false);
         panel.setFocusable(false);
 
-        paymentButton = actionButton("Pay Now", true, view -> showStkPrompt());
-        paymentButton.setTextSize(18);
+        paymentButton = UiTheme.primaryButton(this, "Pay via M-Pesa", view -> showStkPrompt());
+        paymentButton.setTextSize(16);
         paymentButton.setClickable(true);
         paymentButton.setFocusable(true);
         paymentButton.setEnabled(true);
-        panel.addView(paymentButton, blockParams(0, 10, dp(58)));
+        // Extra margin above and below the green pay button itself.
+        panel.addView(paymentButton, blockParams(4, 14, dp(56)));
+
+        TextView helper = UiTheme.text(this, "You will receive an M-Pesa STK prompt. Enter your PIN to confirm.", 12, UiTheme.MUTED, false);
+        helper.setPadding(dp(2), dp(4), dp(2), dp(4));
+        helper.setLineSpacing(dp(2), 1.05f);
+        panel.addView(helper);
         return panel;
     }
 
     private View statusStrip() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(0, dp(6), 0, dp(10));
-        statusDetail = label("Device service is monitoring your account.", 13, MUTED, false);
-        statusDetail.setLineSpacing(dp(2), 1.0f);
+        panel.setBackground(UiTheme.softCard(this));
+        panel.setPadding(dp(14), dp(14), dp(14), dp(14));
+        // Clear gap from the pay section above.
+        panel.setLayoutParams(blockParams(8, 0));
+
+        panel.addView(UiTheme.sectionLabel(this, "Status"));
+        statusDetail = UiTheme.text(this, "Monitoring account for payment confirmation.", 13, UiTheme.INK_SOFT, false);
+        statusDetail.setPadding(0, dp(8), 0, 0);
+        statusDetail.setLineSpacing(dp(2), 1.1f);
         panel.addView(statusDetail);
         return panel;
+    }
+
+    private View spacer(int heightDp) {
+        View v = new View(this);
+        v.setLayoutParams(new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(heightDp)));
+        return v;
     }
 
     private void showAdminUnlock() {
@@ -672,33 +703,55 @@ public class MainActivity extends Activity {
     private void renderPolicy(Policy policy) {
         latestPolicy = policy;
         if (policy == null) {
-            amountView.setText("Ksh 0");
-            dueView.setText("Due date: Not synced");
-            if (accountStatusView != null) accountStatusView.setText("Account status: Syncing");
-            if (arrearsView != null) arrearsView.setText("Arrears: Ksh 0");
-            accountView.setText("Waiting for account details.");
+            if (amountView != null) amountView.setText("Ksh 0");
+            if (dueView != null) dueView.setText("Due date · Not synced");
+            setStatusPill("Syncing", true);
+            if (arrearsValue != null) arrearsValue.setText("Arrears · Ksh 0");
+            setMeta(customerValue, "Customer", "—");
+            setMeta(phoneValue, "M-Pesa phone", "—");
+            setMeta(balanceValue, "Total balance", "Ksh 0");
             updatePaymentButton(null);
             return;
         }
-        amountView.setText(formatKes(suggestedStkAmount(policy)));
-        dueView.setText("Due date: " + dueDate(policy));
-        if (accountStatusView != null) accountStatusView.setText("Account status: " + accountState(policy));
-        if (arrearsView != null) arrearsView.setText("Arrears: " + formatKes(policy.arrears));
-        accountView.setText(accountText(policy));
+        if (amountView != null) amountView.setText(formatKes(suggestedStkAmount(policy)));
+        if (dueView != null) dueView.setText("Due date · " + dueDate(policy));
+        setStatusPill(accountState(policy), isRestrictedState(policy));
+        if (arrearsValue != null) arrearsValue.setText("Arrears · " + formatKes(policy.arrears));
+        setMeta(customerValue, "Customer", policy.customer == null || policy.customer.trim().isEmpty() ? "Customer" : policy.customer.trim());
+        String phone = policy.customerPhone == null || policy.customerPhone.trim().isEmpty()
+                ? "On file"
+                : policy.customerPhone.trim();
+        setMeta(phoneValue, "M-Pesa phone", phone);
+        setMeta(balanceValue, "Total balance", formatKes(policy.balance));
         updatePaymentButton(policy);
+    }
+
+    private void setMeta(LinearLayout row, String label, String value) {
+        if (row == null || row.getChildCount() < 2) return;
+        if (row.getChildAt(0) instanceof TextView) ((TextView) row.getChildAt(0)).setText(label);
+        if (row.getChildAt(1) instanceof TextView) ((TextView) row.getChildAt(1)).setText(value);
+    }
+
+    private void setStatusPill(String label, boolean restricted) {
+        if (accountStatusView == null) return;
+        accountStatusView.setText(label);
+        accountStatusView.setTextColor(restricted ? UiTheme.WARNING : UiTheme.SUCCESS);
+        accountStatusView.setBackground(UiTheme.pill(
+                restricted ? UiTheme.WARNING_SOFT : UiTheme.ACCENT_SOFT,
+                restricted ? Color.rgb(253, 186, 116) : Color.rgb(167, 221, 188),
+                this
+        ));
+    }
+
+    private boolean isRestrictedState(Policy policy) {
+        if (policy == null) return true;
+        if (DeviceControls.isFullLockPolicy(policy)) return true;
+        if (DeviceControls.isPaymentLimitActive(policy)) return true;
+        return policy.balance > 0;
     }
 
     private String dueDate(Policy policy) {
         return policy.nextDue == null || policy.nextDue.trim().isEmpty() ? "Not set" : policy.nextDue.trim();
-    }
-
-    private String accountText(Policy policy) {
-        String phone = policy.customerPhone == null || policy.customerPhone.trim().isEmpty()
-                ? "On file"
-                : policy.customerPhone.trim();
-        return "Customer: " + (policy.customer == null ? "Customer" : policy.customer)
-                + "\nM-Pesa phone: " + phone
-                + "\nTotal balance: " + formatKes(policy.balance);
     }
 
     private String accountState(Policy policy) {
@@ -713,24 +766,14 @@ public class MainActivity extends Activity {
         int amount = suggestedStkAmount(policy);
         boolean canPay = amount > 0 && !paymentPending;
         if (paymentPending) {
-            paymentButton.setText("Waiting for M-Pesa...");
-            paymentButton.setEnabled(false);
-            paymentButton.setClickable(false);
-            paymentButton.setTextColor(MUTED);
-            paymentButton.setBackground(panelBg(SOFT, LINE, 1, 6));
+            paymentButton.setText("Waiting for M-Pesa…");
+            UiTheme.stylePrimaryCta(paymentButton, this, false);
         } else if (canPay) {
             paymentButton.setText("Pay " + formatKes(amount) + " via M-Pesa");
-            paymentButton.setEnabled(true);
-            paymentButton.setClickable(true);
-            paymentButton.setFocusable(true);
-            paymentButton.setTextColor(WHITE);
-            paymentButton.setBackground(panelBg(GREEN, GREEN_DARK, 0, 6));
+            UiTheme.stylePrimaryCta(paymentButton, this, true);
         } else {
-            paymentButton.setText("No Payment Due");
-            paymentButton.setEnabled(false);
-            paymentButton.setClickable(false);
-            paymentButton.setTextColor(MUTED);
-            paymentButton.setBackground(panelBg(SOFT, LINE, 1, 6));
+            paymentButton.setText("No payment due");
+            UiTheme.stylePrimaryCta(paymentButton, this, false);
         }
     }
 
@@ -738,48 +781,9 @@ public class MainActivity extends Activity {
         if (statusDetail != null) statusDetail.setText(value);
     }
 
-    private TextView label(String value, int size, int color, boolean strong) {
-
-        TextView text = new TextView(this);
-        text.setText(value);
-        text.setTextSize(size);
-        text.setTextColor(color);
-        text.setGravity(Gravity.START);
-        if (strong) text.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        return text;
-    }
-
-    private EditText input(String label, String hint) {
-        EditText input = new EditText(this);
-        input.setHint(label + " - " + hint);
-        input.setSingleLine(true);
-        input.setTextSize(14);
-        input.setTextColor(BLACK);
-        input.setHintTextColor(Color.rgb(132, 132, 132));
-        input.setPadding(dp(12), 0, dp(12), 0);
-        input.setBackground(panelBg(SOFT, LINE, 1, 6));
-        input.setLayoutParams(blockParams(0, 10, dp(46)));
-        return input;
-    }
-
-    private Button actionButton(String label, boolean primary, View.OnClickListener listener) {
-        Button button = new Button(this);
-        button.setText(label);
-        button.setAllCaps(false);
-        button.setTextSize(14);
-        button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        button.setTextColor(primary ? WHITE : BLACK);
-        button.setMinHeight(0);
-        button.setMinimumHeight(0);
-        button.setPadding(dp(6), 0, dp(6), 0);
-        button.setBackground(panelBg(primary ? GREEN : WHITE, primary ? GREEN : LINE, 1, 6));
-        button.setOnClickListener(listener);
-        return button;
-    }
-
     private void configureWindow() {
-        getWindow().setStatusBarColor(WHITE);
-        getWindow().setNavigationBarColor(WHITE);
+        getWindow().setStatusBarColor(UiTheme.SURFACE);
+        getWindow().setNavigationBarColor(UiTheme.SURFACE);
         int flags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
         if (Build.VERSION.SDK_INT >= 26) flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         getWindow().getDecorView().setSystemUiVisibility(flags);
@@ -796,14 +800,6 @@ public class MainActivity extends Activity {
         );
         params.setMargins(0, dp(topDp), 0, dp(bottomDp));
         return params;
-    }
-
-    private GradientDrawable panelBg(int fill, int stroke, int strokeWidthDp, int radiusDp) {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(fill);
-        drawable.setCornerRadius(dp(radiusDp));
-        if (strokeWidthDp > 0) drawable.setStroke(dp(strokeWidthDp), stroke);
-        return drawable;
     }
 
     private int dp(int value) {

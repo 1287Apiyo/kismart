@@ -5,7 +5,6 @@ import android.accessibilityservice.AccessibilityServiceInfo;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
-import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
@@ -838,7 +837,7 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     private View buildBlocker() {
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(Color.WHITE);
+        root.setBackgroundColor(UiTheme.SURFACE);
         root.setClickable(true);
         root.setFocusable(true);
 
@@ -848,70 +847,61 @@ public class KismartAccessibilityService extends AccessibilityService {
         int side = dp(28);
         content.setPadding(side, side, side, side);
 
-        ImageView logo = new ImageView(this);
-        logo.setImageResource(R.drawable.logo);
-        logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        logo.setContentDescription("KISMART");
-        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(72), dp(72));
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.setBackground(UiTheme.card(this));
+        card.setPadding(dp(22), dp(26), dp(22), dp(22));
+        card.setElevation(dp(2));
+
+        ImageView logo = UiTheme.logo(this, 64);
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(64), dp(64));
         logoParams.gravity = Gravity.CENTER_HORIZONTAL;
         logoParams.bottomMargin = dp(16);
+        card.addView(logo, logoParams);
 
-        TextView title = new TextView(this);
-        title.setText("PAYMENT REQUIRED");
-        title.setTextColor(Color.rgb(10, 15, 13));
-        title.setTextSize(24);
-        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        TextView kicker = UiTheme.sectionLabel(this, "Payment required");
+        kicker.setGravity(Gravity.CENTER);
+        card.addView(kicker);
+
+        TextView title = UiTheme.text(this, "Account payment needed", 20, UiTheme.INK, true);
         title.setGravity(Gravity.CENTER);
+        title.setPadding(0, dp(10), 0, dp(8));
+        card.addView(title);
 
-        TextView message = new TextView(this);
-        message.setText("This phone needs a payment to continue.");
-        message.setTextColor(Color.rgb(62, 74, 68));
-        message.setTextSize(15);
+        TextView message = UiTheme.text(
+                this,
+                "This phone is restricted until the installment payment is completed.",
+                14,
+                UiTheme.MUTED,
+                false
+        );
         message.setGravity(Gravity.CENTER);
-        message.setLineSpacing(dp(2), 1.0f);
+        message.setLineSpacing(dp(2), 1.15f);
+        message.setPadding(0, 0, 0, dp(18));
+        card.addView(message);
 
-        Button open = new Button(this);
-        open.setText("Pay Now");
-        open.setTextColor(Color.WHITE);
-        open.setTextSize(14);
-        open.setAllCaps(false);
-        open.setBackgroundColor(Color.rgb(10, 15, 13));
-        open.setOnClickListener(view -> openPaymentPrompt());
+        Button open = UiTheme.primaryButton(this, "Continue to pay", view -> openPaymentPrompt());
+        card.addView(open, buttonParams());
 
-        Button emergency = new Button(this);
-        emergency.setText("Emergency 112");
-        emergency.setTextColor(Color.rgb(10, 15, 13));
-        emergency.setTextSize(14);
-        emergency.setAllCaps(false);
-        emergency.setBackgroundColor(Color.rgb(228, 235, 231));
-        emergency.setOnClickListener(view -> {
+        Button emergency = UiTheme.secondaryButton(this, "Emergency 112", view -> {
             emergencyAllowedUntil = System.currentTimeMillis() + EMERGENCY_ALLOW_MS;
             hideBlockerNow();
             DeviceControls.callEmergency(this);
         });
+        card.addView(emergency, buttonParams());
 
-        content.addView(logo, logoParams);
-        content.addView(title, new LinearLayout.LayoutParams(
+        content.addView(card, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        content.addView(message, spacedParams());
-        content.addView(open, buttonParams());
-        content.addView(emergency, buttonParams());
 
         root.addView(content, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         return root;
     }
 
-    private LinearLayout.LayoutParams spacedParams() {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        params.setMargins(0, dp(16), 0, dp(20));
-        return params;
-    }
-
     private LinearLayout.LayoutParams buttonParams() {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(48));
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(50));
         params.setMargins(0, dp(8), 0, 0);
         return params;
     }

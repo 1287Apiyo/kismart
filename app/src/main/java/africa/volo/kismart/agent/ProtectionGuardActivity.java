@@ -3,7 +3,6 @@ package africa.volo.kismart.agent;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
-import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -18,11 +17,6 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 public class ProtectionGuardActivity extends Activity {
-    private static final int BLACK = Color.rgb(5, 8, 7);
-    private static final int GREEN = Color.rgb(22, 163, 74);
-    private static final int WHITE = Color.WHITE;
-    private static final int MUTED = Color.rgb(170, 184, 176);
-
     private final Handler handler = new Handler(Looper.getMainLooper());
     private long allowSettingsUntil;
     private final Runnable reassertRunnable = new Runnable() {
@@ -74,8 +68,8 @@ public class ProtectionGuardActivity extends Activity {
     private void configureWindow() {
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         Window window = getWindow();
-        window.setStatusBarColor(BLACK);
-        window.setNavigationBarColor(BLACK);
+        window.setStatusBarColor(UiTheme.BLACK);
+        window.setNavigationBarColor(UiTheme.BLACK);
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
@@ -83,46 +77,52 @@ public class ProtectionGuardActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER);
-        root.setPadding(dp(28), dp(28), dp(28), dp(28));
-        root.setBackgroundColor(BLACK);
+        root.setPadding(dp(24), dp(24), dp(24), dp(24));
+        root.setBackgroundColor(UiTheme.BLACK);
         root.setClickable(true);
         root.setFocusable(true);
 
-        ImageView logo = new ImageView(this);
-        logo.setImageResource(R.drawable.logo);
-        logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        logo.setContentDescription("KISMART");
-        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(72), dp(72));
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.setBackground(UiTheme.shape(Color.rgb(18, 24, 21), Color.rgb(40, 52, 46), 1, 16, this));
+        card.setPadding(dp(22), dp(26), dp(22), dp(22));
+
+        ImageView logo = UiTheme.logo(this, 64);
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(64), dp(64));
         logoParams.gravity = Gravity.CENTER_HORIZONTAL;
         logoParams.bottomMargin = dp(18);
-        root.addView(logo, logoParams);
+        card.addView(logo, logoParams);
 
-        TextView title = new TextView(this);
-        title.setText("DEVICE SERVICE REQUIRED");
-        title.setTextColor(GREEN);
-        title.setTextSize(24);
-        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        TextView kicker = UiTheme.sectionLabel(this, "Setup required");
+        kicker.setTextColor(Color.rgb(159, 212, 184));
+        kicker.setGravity(Gravity.CENTER);
+        card.addView(kicker);
+
+        TextView title = UiTheme.text(this, "Enable Device Service", 22, UiTheme.WHITE, true);
         title.setGravity(Gravity.CENTER);
-        root.addView(title, matchWrap(0, 14));
+        title.setPadding(0, dp(10), 0, dp(8));
+        card.addView(title);
 
-        TextView message = new TextView(this);
-        message.setText("Enable Device Service in Accessibility to continue.");
-        message.setTextColor(MUTED);
-        message.setTextSize(15);
+        TextView message = UiTheme.text(
+                this,
+                "Turn on Device Service under Accessibility to protect this financed phone and continue.",
+                14,
+                Color.rgb(176, 190, 182),
+                false
+        );
         message.setGravity(Gravity.CENTER);
-        message.setLineSpacing(dp(3), 1.0f);
-        root.addView(message, matchWrap(0, 22));
+        message.setLineSpacing(dp(3), 1.15f);
+        message.setPadding(0, 0, 0, dp(20));
+        card.addView(message);
 
-        Button enable = new Button(this);
-        enable.setText("Open Accessibility");
-        enable.setAllCaps(false);
-        enable.setTextColor(WHITE);
-        enable.setTextSize(15);
-        enable.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        enable.setBackgroundColor(GREEN);
-        enable.setOnClickListener(view -> openAccessibilitySettings());
-        root.addView(enable, matchHeight(0, 0, dp(52)));
+        Button enable = UiTheme.primaryButton(this, "Open Accessibility settings", view -> openAccessibilitySettings());
+        card.addView(enable, UiTheme.match(this, 0, 0, dp(52)));
 
+        root.addView(card, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
         return root;
     }
 
@@ -141,19 +141,6 @@ public class ProtectionGuardActivity extends Activity {
         handler.removeCallbacks(reassertRunnable);
         long delay = Math.max(1200L, allowSettingsUntil - System.currentTimeMillis());
         handler.postDelayed(reassertRunnable, delay);
-    }
-
-    private LinearLayout.LayoutParams matchWrap(int topDp, int bottomDp) {
-        return matchHeight(topDp, bottomDp, LinearLayout.LayoutParams.WRAP_CONTENT);
-    }
-
-    private LinearLayout.LayoutParams matchHeight(int topDp, int bottomDp, int height) {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                height
-        );
-        params.setMargins(0, dp(topDp), 0, dp(bottomDp));
-        return params;
     }
 
     private int dp(int value) {

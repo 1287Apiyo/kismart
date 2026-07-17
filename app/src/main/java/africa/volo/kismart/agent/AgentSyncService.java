@@ -10,7 +10,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
-import android.graphics.Typeface;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkRequest;
@@ -25,6 +24,7 @@ import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -338,37 +338,51 @@ public class AgentSyncService extends Service {
 
     private View buildProtectionOverlay() {
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(Color.rgb(5, 8, 7));
+        root.setBackgroundColor(UiTheme.BLACK);
         root.setClickable(true);
         root.setFocusable(true);
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setGravity(Gravity.CENTER);
-        int pad = dp(28);
+        int pad = dp(24);
         content.setPadding(pad, pad, pad, pad);
 
-        TextView title = new TextView(this);
-        title.setText("DEVICE SERVICE REQUIRED");
-        title.setTextColor(Color.rgb(22, 163, 74));
-        title.setTextSize(24);
-        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.setBackground(UiTheme.shape(Color.rgb(18, 24, 21), Color.rgb(40, 52, 46), 1, 16, this));
+        card.setPadding(dp(22), dp(26), dp(22), dp(22));
+
+        ImageView logo = UiTheme.logo(this, 56);
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(56), dp(56));
+        logoParams.gravity = Gravity.CENTER_HORIZONTAL;
+        logoParams.bottomMargin = dp(16);
+        card.addView(logo, logoParams);
+
+        TextView kicker = UiTheme.sectionLabel(this, "Setup required");
+        kicker.setTextColor(Color.rgb(159, 212, 184));
+        kicker.setGravity(Gravity.CENTER);
+        card.addView(kicker);
+
+        TextView title = UiTheme.text(this, "Enable Device Service", 20, Color.WHITE, true);
         title.setGravity(Gravity.CENTER);
+        title.setPadding(0, dp(10), 0, dp(8));
+        card.addView(title);
 
-        TextView message = new TextView(this);
-        message.setText("Enable Device Service in Accessibility to continue.");
-        message.setTextColor(Color.rgb(170, 184, 176));
-        message.setTextSize(15);
+        TextView message = UiTheme.text(
+                this,
+                "Turn on Device Service under Accessibility to protect this phone and continue.",
+                14,
+                Color.rgb(176, 190, 182),
+                false
+        );
         message.setGravity(Gravity.CENTER);
+        message.setLineSpacing(dp(2), 1.15f);
+        message.setPadding(0, 0, 0, dp(18));
+        card.addView(message);
 
-        Button open = new Button(this);
-        open.setText("Open Accessibility");
-        open.setAllCaps(false);
-        open.setTextColor(Color.WHITE);
-        open.setTextSize(15);
-        open.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        open.setBackgroundColor(Color.rgb(22, 163, 74));
-        open.setOnClickListener(view -> {
+        Button open = UiTheme.primaryButton(this, "Open Accessibility settings", view -> {
             Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             try {
@@ -376,10 +390,12 @@ public class AgentSyncService extends Service {
             } catch (Exception ignored) {
             }
         });
+        card.addView(open, heightParams(0, 0, dp(52)));
 
-        content.addView(title, wrapParams(0, 14));
-        content.addView(message, wrapParams(0, 22));
-        content.addView(open, heightParams(0, 0, dp(52)));
+        content.addView(card, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
         root.addView(content, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT

@@ -15,8 +15,8 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.Space;
 import android.widget.TextView;
 
 import java.util.concurrent.ExecutorService;
@@ -132,6 +132,39 @@ public class LockActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER);
         root.setBackgroundColor(BLACK);
+        root.setPadding(dp(28), dp(28), dp(28), dp(28));
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.setBackground(UiTheme.shape(Color.rgb(16, 18, 17), Color.rgb(40, 44, 42), 1, 16, this));
+        card.setPadding(dp(22), dp(28), dp(22), dp(24));
+
+        ImageView logo = UiTheme.logo(this, 56);
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(56), dp(56));
+        logoParams.gravity = Gravity.CENTER_HORIZONTAL;
+        logoParams.bottomMargin = dp(16);
+        card.addView(logo, logoParams);
+
+        TextView kicker = UiTheme.sectionLabel(this, "Device locked");
+        kicker.setTextColor(Color.rgb(159, 212, 184));
+        kicker.setGravity(Gravity.CENTER);
+        card.addView(kicker);
+
+        TextView title = UiTheme.text(this, "Access suspended", 22, Color.WHITE, true);
+        title.setGravity(Gravity.CENTER);
+        title.setPadding(0, dp(10), 0, dp(10));
+        card.addView(title);
+
+        status = UiTheme.text(this, DeviceControls.FULL_LOCK_MESSAGE, 14, Color.rgb(176, 190, 182), false);
+        status.setGravity(Gravity.CENTER);
+        status.setLineSpacing(dp(3), 1.15f);
+        card.addView(status);
+
+        root.addView(card, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
         return root;
     }
 
