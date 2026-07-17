@@ -11,6 +11,7 @@ import java.util.Set;
 final class Policy {
     final String contractId;
     final String customer;
+    final String customerPhone;
     final String imei;
     final String status;
     final String restrictionLevel;
@@ -19,15 +20,18 @@ final class Policy {
     final int balance;
     final int arrears;
     final String nextDue;
+    final int nextAmount;
     final int pendingCommandCount;
     final boolean identityBound;
     final int identityMismatchCount;
     final boolean paymentOnlyActive;
+    final boolean mpesaReady;
     final String[] allowedPaymentPackages;
 
     private Policy(
             String contractId,
             String customer,
+            String customerPhone,
             String imei,
             String status,
             String restrictionLevel,
@@ -36,14 +40,17 @@ final class Policy {
             int balance,
             int arrears,
             String nextDue,
+            int nextAmount,
             int pendingCommandCount,
             boolean identityBound,
             int identityMismatchCount,
             boolean paymentOnlyActive,
+            boolean mpesaReady,
             String[] allowedPaymentPackages
     ) {
         this.contractId = contractId;
         this.customer = customer;
+        this.customerPhone = customerPhone;
         this.imei = imei;
         this.status = status;
         this.restrictionLevel = restrictionLevel;
@@ -52,10 +59,12 @@ final class Policy {
         this.balance = balance;
         this.arrears = arrears;
         this.nextDue = nextDue;
+        this.nextAmount = nextAmount;
         this.pendingCommandCount = pendingCommandCount;
         this.identityBound = identityBound;
         this.identityMismatchCount = identityMismatchCount;
         this.paymentOnlyActive = paymentOnlyActive;
+        this.mpesaReady = mpesaReady;
         this.allowedPaymentPackages = allowedPaymentPackages;
     }
 
@@ -90,9 +99,11 @@ final class Policy {
             restrictionLevel = "Limited access";
         }
 
+        int nextAmount = object.optInt("nextAmount", 0);
         return new Policy(
                 object.optString("contractId"),
                 object.optString("customer"),
+                object.optString("customerPhone", ""),
                 object.optString("imei"),
                 object.optString("status"),
                 restrictionLevel,
@@ -101,10 +112,12 @@ final class Policy {
                 balance,
                 arrears,
                 object.optString("nextDue", ""),
+                nextAmount,
                 commands == null ? 0 : commands.length(),
                 identity != null && identity.optBoolean("bound", false),
                 identity == null ? 0 : identity.optInt("mismatchCount", 0),
                 paymentOnlyActive,
+                object.optBoolean("mpesaReady", true),
                 parseAllowedPackages(object.optJSONArray("allowedPaymentPackages"), paymentOnly == null ? null : paymentOnly.optJSONArray("allowedPackages"))
         );
     }

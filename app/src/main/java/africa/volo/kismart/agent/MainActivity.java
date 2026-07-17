@@ -20,6 +20,8 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import org.json.JSONObject;
+
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -38,6 +40,7 @@ public class MainActivity extends Activity {
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler monitorHandler = new Handler(Looper.getMainLooper());
+    private final Runnable paymentPollRunnable = this::pollPaymentStatus;
     private TextView amountView;
     private TextView dueView;
     private TextView accountView;
@@ -47,6 +50,9 @@ public class MainActivity extends Activity {
     private Button paymentButton;
     private Policy latestPolicy;
     private boolean syncing;
+    private boolean paymentPending;
+    private int paymentPollAttempts;
+    private int paymentBalanceBefore;
 
     private final Runnable monitorRunnable = new Runnable() {
         @Override
@@ -287,31 +293,108 @@ public class MainActivity extends Activity {
             setDetail("Account is still syncing. Try again shortly.");
             return;
         }
+        if (paymentPending) {
+            setDetail("M-Pesa prompt already sent. Enter your PIN on the phone, then wait for confirmation.");
+            return;
+        }
         int amount = suggestedStkAmount(latestPolicy);
         if (amount <= 0) {
             setDetail("Your account has no amount due.");
             return;
         }
+
+        EditText phoneInput = new EditText(this);
+        phoneInput.setInputType(InputType.TYPE_CLASS_PHONE);
+        phoneInput.setSingleLine(true);
+        phoneInput.setHint("07XXXXXXXX");
+        String knownPhone = latestPolicy.customerPhone == null ? "" : latestPolicy.customerPhone.trim();
+        if (!knownPhone.isEmpty()) {
+            phoneInput.setText(knownPhone);
+        }
+
         new AlertDialog.Builder(this)
-                .setTitle("Pay " + formatKes(amount))
-                .setMessage("Confirm payment request for your device account.")
+                .setTitle("Pay " + formatKes(amount) + " via M-Pesa")
+                .setMessage("A real M-Pesa STK prompt will be sent to this phone number. Confirm the number, then enter your M-Pesa PIN when the prompt appears.")
+                .setView(phoneInput)
                 .setNegativeButton("Cancel", null)
-                .setPositiveButton("Pay Now", (dialog, which) -> submitStk(amount))
+                .setPositiveButton("Send STK", (dialog, which) -> {
+                    String phone = phoneInput.getText() == null ? "" : phoneInput.getText().toString().trim();
+                    submitStk(amount, phone);
+                })
                 .show();
     }
 
-    private void submitStk(int amount) {
-        setDetail("Sending payment request...");
+    private void submitStk(int amount, String phoneNumber) {
+        if (paymentButton != null) paymentButton.setEnabled(false);
+        setDetail("Sending M-Pesa STK prompt...");
+        paymentBalanceBefore = latestPolicy == null ? 0 : latestPolicy.balance;
         executor.execute(() -> {
             try {
-                Policy policy = KismartApi.simulateStkPayment(this, amount);
+                JSONObject result = KismartApi.submitPaybillStk(this, amount, phoneNumber);
+                String sentTo = result.optString("phoneNumber", phoneNumber);
+                String message = result.optString(
+                        "message",
+                        "M-Pesa STK prompt sent. Enter your PIN on the phone to complete payment."
+                );
+                runOnUiThread(() -> {
+                    paymentPending = true;
+                    paymentPollAttempts = 0;
+                    setDetail(message + (sentTo == null || sentTo.isEmpty() ? "" : " (" + sentTo + ")"));
+                    schedulePaymentPoll(4000);
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    paymentPending = false;
+                    updatePaymentButton(latestPolicy);
+                    setDetail("Payment request failed: " + error.getMessage());
+                });
+            }
+        });
+    }
+
+    private void schedulePaymentPoll(long delayMs) {
+        monitorHandler.removeCallbacks(paymentPollRunnable);
+        monitorHandler.postDelayed(paymentPollRunnable, delayMs);
+    }
+
+    private void pollPaymentStatus() {
+        if (!paymentPending) return;
+        paymentPollAttempts += 1;
+        setDetail("Waiting for M-Pesa confirmation... (" + paymentPollAttempts + ")");
+        executor.execute(() -> {
+            try {
+                Policy policy = KismartApi.sync(this);
                 runOnUiThread(() -> {
                     DeviceControls.applyPolicy(this, policy);
                     renderPolicy(policy);
-                    setDetail("Payment recorded. Account updated.");
+                    boolean paidDown = policy.balance < paymentBalanceBefore;
+                    boolean cleared = policy.balance <= 0;
+                    if (paidDown || cleared) {
+                        paymentPending = false;
+                        monitorHandler.removeCallbacks(paymentPollRunnable);
+                        setDetail(cleared
+                                ? "Payment confirmed. Account is fully paid."
+                                : "Payment confirmed. Balance updated to " + formatKes(policy.balance) + ".");
+                        return;
+                    }
+                    if (paymentPollAttempts >= 15) {
+                        paymentPending = false;
+                        updatePaymentButton(policy);
+                        setDetail("Still waiting for M-Pesa. If you paid, tap Sync. If not, try Pay again.");
+                        return;
+                    }
+                    schedulePaymentPoll(5000);
                 });
             } catch (Exception error) {
-                runOnUiThread(() -> setDetail("Payment failed: " + error.getMessage()));
+                runOnUiThread(() -> {
+                    if (paymentPollAttempts >= 15) {
+                        paymentPending = false;
+                        updatePaymentButton(latestPolicy);
+                        setDetail("Could not confirm payment yet. Check M-Pesa, then tap Sync.");
+                    } else {
+                        schedulePaymentPoll(5000);
+                    }
+                });
             }
         });
     }
@@ -319,7 +402,8 @@ public class MainActivity extends Activity {
     private int suggestedStkAmount(Policy policy) {
         if (policy == null) return 0;
         if (policy.arrears > 0) return Math.min(policy.balance, policy.arrears);
-        if (policy.balance > 0) return Math.min(policy.balance, 1000);
+        if (policy.nextAmount > 0) return Math.min(policy.balance, policy.nextAmount);
+        if (policy.balance > 0) return policy.balance;
         return 0;
     }
 
@@ -351,7 +435,11 @@ public class MainActivity extends Activity {
     }
 
     private String accountText(Policy policy) {
+        String phone = policy.customerPhone == null || policy.customerPhone.trim().isEmpty()
+                ? "On file"
+                : policy.customerPhone.trim();
         return "Customer: " + (policy.customer == null ? "Customer" : policy.customer)
+                + "\nM-Pesa phone: " + phone
                 + "\nTotal balance: " + formatKes(policy.balance);
     }
 
@@ -365,8 +453,12 @@ public class MainActivity extends Activity {
     private void updatePaymentButton(Policy policy) {
         if (paymentButton == null) return;
         int amount = suggestedStkAmount(policy);
-        boolean canPay = amount > 0;
-        paymentButton.setText(canPay ? "Pay " + formatKes(amount) + " Now" : "No Payment Due");
+        boolean canPay = amount > 0 && !paymentPending;
+        if (paymentPending) {
+            paymentButton.setText("Waiting for M-Pesa...");
+        } else {
+            paymentButton.setText(canPay ? "Pay " + formatKes(amount) + " via M-Pesa" : "No Payment Due");
+        }
         paymentButton.setEnabled(canPay);
         paymentButton.setTextColor(canPay ? WHITE : MUTED);
         paymentButton.setBackground(panelBg(canPay ? GREEN : SOFT, canPay ? GREEN_DARK : LINE, canPay ? 0 : 1, 6));

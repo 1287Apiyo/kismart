@@ -29,7 +29,7 @@ final class KismartApi {
     static final String KEY_INSTALL_ID = "install_id";
     static final String KEY_BINDING_TOKEN = "binding_token";
     private static final String KEY_APPLIED_COMMAND_IDS = "applied_command_ids";
-    static final String APP_VERSION = "android-1.0.47";
+    static final String APP_VERSION = "android-1.0.49";
     /**
      * Public HTTPS control plane. Phones must use this (or another public host) so lock/restore
      * works from mobile data and any Wi-Fi, not only the shop LAN.
@@ -103,26 +103,10 @@ final class KismartApi {
         return request(context, "POST", baseUrl + "/api/devices/" + encode(imei) + "/tamper", body);
     }
 
-    static Policy simulateStkPayment(Context context, int amount) throws Exception {
-        SharedPreferences prefs = prefs(context);
-        String baseUrl = serverUrl(context);
-        String imei = prefs.getString(KEY_IMEI, "");
-        if (baseUrl.isEmpty() || imei.isEmpty()) {
-            throw new IllegalStateException("Enter backend URL and device IMEI first.");
-        }
-        JSONObject body = new JSONObject();
-        body.put("amount", amount);
-        body.put("reference", "STK-" + System.currentTimeMillis());
-        body.put("appVersion", APP_VERSION);
-        body.put("network", "stk-prompt");
-        body.put("identity", deviceIdentity(context));
-        JSONObject response = request(context, "POST", baseUrl + "/api/devices/" + encode(imei) + "/stk-test", body);
-        JSONObject policy = response.optJSONObject("policy");
-        if (policy == null) throw new IllegalStateException("Backend did not return a policy.");
-        persistPolicy(context, policy);
-        return Policy.fromJson(policy);
-    }
-
+    /**
+     * Starts a real Safaricom Lipa Na M-Pesa Online (STK Push) request via the backend.
+     * Payment is only recorded after Safaricom posts the STK result callback.
+     */
     static JSONObject submitPaybillStk(Context context, int amount, String phoneNumber) throws Exception {
         SharedPreferences prefs = prefs(context);
         String baseUrl = serverUrl(context);
@@ -132,7 +116,9 @@ final class KismartApi {
         }
         JSONObject body = new JSONObject();
         body.put("amount", amount);
-        body.put("phoneNumber", phoneNumber);
+        if (phoneNumber != null && !phoneNumber.trim().isEmpty()) {
+            body.put("phoneNumber", phoneNumber.trim());
+        }
         body.put("reference", "PAYBILL-" + System.currentTimeMillis());
         body.put("appVersion", APP_VERSION);
         body.put("network", "paybill-stk");

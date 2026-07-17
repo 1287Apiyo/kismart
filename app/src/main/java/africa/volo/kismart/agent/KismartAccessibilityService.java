@@ -30,19 +30,25 @@ import android.widget.TextView;
  */
 public class KismartAccessibilityService extends AccessibilityService {
     private static final long WATCHDOG_INTERVAL_MS = 200L;
-    private static final long WATCHDOG_LIMIT_INTERVAL_MS = 120L;
+    private static final long WATCHDOG_LIMIT_INTERVAL_MS = 100L;
+    private static final long WATCHDOG_APP_INFO_INTERVAL_MS = 50L;
     private static final long EMERGENCY_ALLOW_MS = 30000L;
     private static final long KISMART_OPEN_ALLOW_MS = 5000L;
+    /** Keep blocking App Info / uninstall for this long after Device Service is detected. */
+    private static final long PROTECTED_SURFACE_STICKY_MS = 12000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable watchdog = new Runnable() {
         @Override
         public void run() {
             checkBlockerState();
-            long delay = DeviceControls.isPaymentLimitActive(KismartApi.lastPolicy(KismartAccessibilityService.this))
-                    || DeviceControls.isFullLockPolicy(KismartApi.lastPolicy(KismartAccessibilityService.this))
-                    ? WATCHDOG_LIMIT_INTERVAL_MS
-                    : WATCHDOG_INTERVAL_MS;
+            long delay = WATCHDOG_INTERVAL_MS;
+            if (System.currentTimeMillis() < protectedSurfaceUntil || watchingAppDetails) {
+                delay = WATCHDOG_APP_INFO_INTERVAL_MS;
+            } else if (DeviceControls.isPaymentLimitActive(KismartApi.lastPolicy(KismartAccessibilityService.this))
+                    || DeviceControls.isFullLockPolicy(KismartApi.lastPolicy(KismartAccessibilityService.this))) {
+                delay = WATCHDOG_LIMIT_INTERVAL_MS;
+            }
             handler.postDelayed(this, delay);
         }
     };
@@ -53,15 +59,78 @@ public class KismartAccessibilityService extends AccessibilityService {
     private boolean fullLockBlockerVisible;
     private long emergencyAllowedUntil;
     private long allowKismartOpenUntil;
+    /** Sticky latch: once Device Service app info is seen, keep overlay until user leaves. */
+    private long protectedSurfaceUntil;
+    /** True while Settings App Details / Uninstaller activity class is in the foreground. */
+    private boolean watchingAppDetails;
+    private boolean optimisticAppDetailsBlock;
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
-        // Fast path: react on the event package/text before a full tree walk.
-        if (isRestrictedEvent(event)) {
-            showBlockerNow();
-            return;
+        DeviceControls.protectAppFromUninstall(this);
+
+        String packageName = packageOf(event);
+        String className = classOf(event);
+        String eventText = eventText(event);
+
+        // 1) App Details / Uninstaller activity opened → block IMMEDIATELY (no tree wait).
+        //    Other apps' details may flash briefly then release if not Device Service.
+        if (isAppDetailsOrUninstallClass(className) || isPackageInstallerPackage(packageName)) {
+            watchingAppDetails = true;
+            if (isProtectionArmed()) {
+                if (mentionsProtectedApp(eventText) || packageNameHintsProtectedApp(eventText, className)) {
+                    armProtectedSurface();
+                    showBlockerNow();
+                    return;
+                }
+                // Optimistic: cover App Info before labels finish loading.
+                optimisticAppDetailsBlock = true;
+                showBlockerNow();
+                // Confirm within a few frames whether this is Device Service.
+                handler.post(this::confirmOptimisticAppDetailsBlock);
+                handler.postDelayed(this::confirmOptimisticAppDetailsBlock, 40L);
+                handler.postDelayed(this::confirmOptimisticAppDetailsBlock, 100L);
+                handler.postDelayed(this::confirmOptimisticAppDetailsBlock, 200L);
+                return;
+            }
         }
+
+        // 2) Any event text mentioning Device Service / package → sticky block now.
+        if (isProtectionArmed() && (mentionsProtectedApp(eventText) || isRestrictedContent(eventText))) {
+            if (isSettingsLikePackage(packageName)
+                    || isPackageInstallerPackage(packageName)
+                    || isAppDetailsOrUninstallClass(className)
+                    || isRestrictedContent(eventText)) {
+                armProtectedSurface();
+                showBlockerNow();
+                return;
+            }
+        }
+
+        // 3) Sticky latch still active while in Settings/installer.
+        if (System.currentTimeMillis() < protectedSurfaceUntil) {
+            if (isSettingsLikePackage(packageName) || isPackageInstallerPackage(packageName) || packageName.isEmpty()) {
+                showBlockerNow();
+                return;
+            }
+            // Left Settings — drop sticky.
+            if (!isSettingsLikePackage(packageName) && !isPackageInstallerPackage(packageName)) {
+                protectedSurfaceUntil = 0L;
+                watchingAppDetails = false;
+                optimisticAppDetailsBlock = false;
+            }
+        }
+
+        // 4) Fast find-by-text on Settings (no full tree walk).
+        if (isProtectionArmed() && (isSettingsLikePackage(packageName) || isPackageInstallerPackage(packageName))) {
+            if (sourceMentionsProtectedAppFast()) {
+                armProtectedSurface();
+                showBlockerNow();
+                return;
+            }
+        }
+
         checkBlockerState();
     }
 
@@ -97,8 +166,65 @@ public class KismartAccessibilityService extends AccessibilityService {
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC;
         info.notificationTimeout = 0L;
         info.flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
-                | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
+                | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+                | AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;
         setServiceInfo(info);
+    }
+
+    private void armProtectedSurface() {
+        protectedSurfaceUntil = System.currentTimeMillis() + PROTECTED_SURFACE_STICKY_MS;
+        optimisticAppDetailsBlock = false;
+        watchingAppDetails = true;
+    }
+
+    private void confirmOptimisticAppDetailsBlock() {
+        if (!optimisticAppDetailsBlock && System.currentTimeMillis() >= protectedSurfaceUntil) return;
+        if (sourceMentionsProtectedAppFast() || screenMentionsProtectedAppFast()) {
+            armProtectedSurface();
+            showBlockerNow();
+            return;
+        }
+        // Still on App Details class? keep optimistic cover a bit longer.
+        String pkg = activePackageName();
+        if (watchingAppDetails && (isSettingsLikePackage(pkg) || isPackageInstallerPackage(pkg))) {
+            if (sourceMentionsProtectedAppFast()) {
+                armProtectedSurface();
+                showBlockerNow();
+            }
+            // Do not hide yet — labels may still be loading. A later tick will hide if not ours.
+            handler.postDelayed(this::releaseOptimisticIfNotProtected, 180L);
+            return;
+        }
+        releaseOptimisticIfNotProtected();
+    }
+
+    private void releaseOptimisticIfNotProtected() {
+        if (System.currentTimeMillis() < protectedSurfaceUntil) {
+            showBlockerNow();
+            return;
+        }
+        if (sourceMentionsProtectedAppFast() || screenMentionsProtectedAppFast()) {
+            armProtectedSurface();
+            showBlockerNow();
+            return;
+        }
+        // Confirmed not Device Service app info — release optimistic block only.
+        optimisticAppDetailsBlock = false;
+        watchingAppDetails = false;
+        if (blockerVisible) {
+            // Re-evaluate normal limit / financed rules (do not leave a stuck overlay on other apps' App Info).
+            checkBlockerState();
+        }
+    }
+
+    private boolean isProtectionArmed() {
+        Policy policy = KismartApi.lastPolicy(this);
+        if (DeviceControls.isPaymentLimitActive(policy) || DeviceControls.isFullLockPolicy(policy)) {
+            return true;
+        }
+        if (DeviceControls.isFinancedPolicy(policy)) return true;
+        String imei = KismartApi.prefs(this).getString(KismartApi.KEY_IMEI, "");
+        return imei != null && !imei.trim().isEmpty();
     }
 
     // ========== Main decision logic ==========
@@ -109,14 +235,47 @@ public class KismartAccessibilityService extends AccessibilityService {
         // Never block KISMART itself (payment / account UI).
         if (!packageName.isEmpty() && getPackageName().equals(packageName)) {
             hideBlockerNow();
+            protectedSurfaceUntil = 0L;
+            watchingAppDetails = false;
+            optimisticAppDetailsBlock = false;
             return;
         }
 
-        // Named restricted screens only — not all of Settings.
+        // Sticky: Device Service app info / uninstall already identified.
+        if (System.currentTimeMillis() < protectedSurfaceUntil) {
+            if (packageName.isEmpty()
+                    || isSettingsLikePackage(packageName)
+                    || isPackageInstallerPackage(packageName)
+                    || isLauncherPackage(packageName)) {
+                showBlockerNow();
+                return;
+            }
+            protectedSurfaceUntil = 0L;
+        }
+
+        // Fast Device Service detection (findAccessibilityNodeInfosByText — much faster than full walk).
+        if (isProtectionArmed()
+                && (isSettingsLikePackage(packageName) || isPackageInstallerPackage(packageName) || watchingAppDetails)) {
+            if (sourceMentionsProtectedAppFast() || screenMentionsProtectedAppFast()) {
+                armProtectedSurface();
+                showBlockerNow();
+                return;
+            }
+            // Optimistic cover only while App Details labels may still be loading for an unknown app.
+            if (optimisticAppDetailsBlock) {
+                showBlockerNow();
+                return;
+            }
+        }
+
+        // Named restricted screens (factory reset / accessibility / device admin / our app info).
         if (!packageName.isEmpty() && isDangerousScreenNow(packageName)) {
             showBlockerNow();
             return;
         }
+
+        watchingAppDetails = false;
+        optimisticAppDetailsBlock = false;
 
         if (policy == null) {
             hideBlockerNow();
@@ -129,19 +288,14 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Limit mode: block other apps immediately; keep launcher / system / normal settings usable
-        // unless the surface is a named restricted screen (handled above).
+        // Limit mode: block other apps; allow normal Settings unless restricted content above.
         if (DeviceControls.isPaymentLimitActive(policy)) {
-            if (packageName.isEmpty()) {
-                // Keep existing overlay if any; do not flash-hide on empty package samples.
-                return;
-            }
+            if (packageName.isEmpty()) return;
             if (isLauncherPackage(packageName) || isAllowedSystemPackage(packageName)) {
                 hideBlockerNow();
                 return;
             }
             if (isSettingsLikePackage(packageName)) {
-                // Normal Settings home / Wi‑Fi / sound / etc. stay open.
                 hideBlockerNow();
                 return;
             }
@@ -158,41 +312,17 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Financed, not limited: only protect the named dangerous screens (already checked).
-        if (packageName.isEmpty() || isLauncherPackage(packageName) || isSettingsLikePackage(packageName)) {
-            hideBlockerNow();
-            return;
-        }
         hideBlockerNow();
     }
 
-    /**
-     * Instant event-level match so restricted screens are blocked without waiting for the watchdog.
-     */
-    private boolean isRestrictedEvent(AccessibilityEvent event) {
-        CharSequence packageCs = event.getPackageName();
-        String packageName = packageCs == null ? "" : packageCs.toString().trim();
-        if (!packageName.isEmpty() && getPackageName().equals(packageName)) return false;
+    private String packageOf(AccessibilityEvent event) {
+        CharSequence value = event.getPackageName();
+        return value == null ? "" : value.toString().trim();
+    }
 
-        // Uninstall / package installer UI for any package is always high risk while enrolled.
-        if (isPackageInstallerPackage(packageName)) {
-            String eventText = eventText(event);
-            if (mentionsProtectedApp(eventText) || mentionsProtectedApp(collectQuickScreenText())) {
-                return true;
-            }
-            // Installer confirmation dialogs still need a look at on-screen text.
-            return isDangerousScreenNow(packageName);
-        }
-
-        String eventText = eventText(event);
-        if (!eventText.isEmpty() && isRestrictedContent(eventText)) {
-            return true;
-        }
-
-        if (!packageName.isEmpty() && (isSettingsLikePackage(packageName) || isPackageInstallerPackage(packageName))) {
-            return isDangerousScreenNow(packageName);
-        }
-        return false;
+    private String classOf(AccessibilityEvent event) {
+        CharSequence value = event.getClassName();
+        return value == null ? "" : value.toString();
     }
 
     private String eventText(AccessibilityEvent event) {
@@ -214,25 +344,122 @@ public class KismartAccessibilityService extends AccessibilityService {
         return builder.toString().toLowerCase();
     }
 
-    private String collectQuickScreenText() {
+    /**
+     * Fast protected-app detection using framework text search (avoids slow full-tree collection).
+     */
+    private boolean sourceMentionsProtectedAppFast() {
         AccessibilityNodeInfo root = null;
         try {
             root = getRootInActiveWindow();
-            if (root == null) return "";
-            return collectScreenText(root).toLowerCase();
+            return mentionsProtectedAppInRoot(root);
         } catch (Exception ignored) {
-            return "";
+            return false;
         } finally {
             if (root != null) root.recycle();
         }
     }
 
+    private boolean screenMentionsProtectedAppFast() {
+        try {
+            for (AccessibilityWindowInfo window : getWindows()) {
+                if (window == null) continue;
+                AccessibilityNodeInfo root = window.getRoot();
+                if (root == null) continue;
+                try {
+                    if (mentionsProtectedAppInRoot(root)) return true;
+                } finally {
+                    root.recycle();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    private boolean mentionsProtectedAppInRoot(AccessibilityNodeInfo root) {
+        if (root == null) return false;
+        String[] needles = protectedAppNeedles();
+        for (String needle : needles) {
+            if (needle == null || needle.isEmpty()) continue;
+            java.util.List<AccessibilityNodeInfo> hits = null;
+            try {
+                hits = root.findAccessibilityNodeInfosByText(needle);
+                if (hits != null && !hits.isEmpty()) return true;
+            } catch (Exception ignored) {
+            } finally {
+                if (hits != null) {
+                    for (AccessibilityNodeInfo node : hits) {
+                        try {
+                            node.recycle();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+            }
+        }
+        // Also check package name in view ids / shallow text.
+        try {
+            CharSequence pkg = root.getPackageName();
+            if (pkg != null && mentionsProtectedApp(pkg.toString())) return true;
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    private String[] protectedAppNeedles() {
+        return new String[]{
+                getString(R.string.app_name),
+                "Device Service",
+                "device service",
+                "KISMART",
+                "Kismart",
+                getPackageName(),
+                "africa.volo.kismart",
+                "africa.volo.kismart.agent"
+        };
+    }
+
+    private boolean isAppDetailsOrUninstallClass(String className) {
+        if (className == null || className.isEmpty()) return false;
+        String c = className.toLowerCase();
+        return c.contains("installedappdetails")
+                || c.contains("appinfodashboard")
+                || c.contains("applicationdetails")
+                || c.contains("appinfo")
+                || c.contains("applicationsettings")
+                || c.contains("installedapp")
+                || c.contains("uninstaller")
+                || c.contains("uninstallapp")
+                || c.contains("packinstaller")
+                || c.contains("packageinstaller")
+                || c.contains("applicationinfo")
+                || c.contains("manageapplications")
+                || c.contains("installedappdetails top")
+                || c.contains("spacemanager")
+                || c.contains("storagesettings");
+    }
+
+    private boolean packageNameHintsProtectedApp(String eventText, String className) {
+        return mentionsProtectedApp(eventText) || mentionsProtectedApp(className);
+    }
+
     /** Checks package type and on-screen content for the named restricted surfaces only. */
     private boolean isDangerousScreenNow(String packageName) {
+        // Prefer fast search first.
+        if (sourceMentionsProtectedAppFast() || screenMentionsProtectedAppFast()) {
+            if (isSettingsLikePackage(packageName)
+                    || isPackageInstallerPackage(packageName)
+                    || watchingAppDetails) {
+                armProtectedSurface();
+                return true;
+            }
+        }
         if (isPackageInstallerPackage(packageName)) {
             String text = collectQuickScreenText();
-            // Block installer when it mentions our app, or any uninstall confirmation while financed/limited.
-            if (mentionsProtectedApp(text) || isUninstallConfirmation(text)) return true;
+            if (mentionsProtectedApp(text) || isUninstallConfirmation(text)) {
+                armProtectedSurface();
+                return true;
+            }
         }
         if (isSettingsLikePackage(packageName) || isPackageInstallerPackage(packageName)) {
             return isDangerousSettingsScreenContent() || isDangerousRemovalSurfaceContent();
@@ -240,32 +467,40 @@ public class KismartAccessibilityService extends AccessibilityService {
         return isDangerousRemovalSurfaceContent();
     }
 
-    private boolean isDangerousSettingsScreenContent() {
+    private String collectQuickScreenText() {
         AccessibilityNodeInfo root = null;
         try {
-            root = activeInspectionRoot();
-            if (root == null) return false;
-            String text = collectScreenText(root).toLowerCase();
-            return isRestrictedContent(text);
+            root = getRootInActiveWindow();
+            if (root == null) return "";
+            // Shallow walk only — full depth was too slow and let uninstall win the race.
+            StringBuilder builder = new StringBuilder();
+            appendNodeText(root, builder, 0, 4, 4000);
+            return builder.toString().toLowerCase();
         } catch (Exception ignored) {
-            return false;
+            return "";
         } finally {
             if (root != null) root.recycle();
         }
     }
 
-    private boolean isDangerousRemovalSurfaceContent() {
-        AccessibilityNodeInfo root = null;
-        try {
-            root = activeInspectionRoot();
-            if (root == null) return false;
-            String text = collectScreenText(root).toLowerCase();
-            return isProtectedAppManagementScreen(text) || isUninstallConfirmation(text);
-        } catch (Exception ignored) {
-            return false;
-        } finally {
-            if (root != null) root.recycle();
+    private boolean isDangerousSettingsScreenContent() {
+        String text = collectQuickScreenText();
+        if (isRestrictedContent(text)) {
+            if (isProtectedAppManagementScreen(text) || mentionsProtectedApp(text)) {
+                armProtectedSurface();
+            }
+            return true;
         }
+        return false;
+    }
+
+    private boolean isDangerousRemovalSurfaceContent() {
+        String text = collectQuickScreenText();
+        if (isProtectedAppManagementScreen(text) || isUninstallConfirmation(text)) {
+            armProtectedSurface();
+            return true;
+        }
+        return false;
     }
 
     private boolean isRestrictedContent(String text) {
@@ -493,19 +728,28 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     private String collectScreenText(AccessibilityNodeInfo root) {
         StringBuilder builder = new StringBuilder();
-        appendNodeText(root, builder, 0);
+        appendNodeText(root, builder, 0, 5, 6000);
         return builder.toString();
     }
 
-    private void appendNodeText(AccessibilityNodeInfo node, StringBuilder builder, int depth) {
-        if (node == null || depth > 8 || builder.length() > 12000) return;
+    private void appendNodeText(
+            AccessibilityNodeInfo node,
+            StringBuilder builder,
+            int depth,
+            int maxDepth,
+            int maxChars
+    ) {
+        if (node == null || depth > maxDepth || builder.length() > maxChars) return;
         appendText(builder, node.getText());
         appendText(builder, node.getContentDescription());
         appendText(builder, node.getViewIdResourceName());
-        for (int i = 0; i < node.getChildCount(); i++) {
+        int childCount = node.getChildCount();
+        // Cap breadth for speed on dense Settings trees.
+        int limit = Math.min(childCount, depth == 0 ? 40 : 24);
+        for (int i = 0; i < limit; i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
-                appendNodeText(child, builder, depth + 1);
+                appendNodeText(child, builder, depth + 1, maxDepth, maxChars);
                 child.recycle();
             }
         }
