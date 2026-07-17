@@ -26,6 +26,10 @@ final class DeviceControls {
     private static final String TAG = "KismartControls";
     private static final String KEY_PAYMENT_ONLY_SUSPENDED_PACKAGES = "payment_only_suspended_packages";
     private static final String KEY_PAYMENT_ONLY_HIDDEN_PACKAGES = "payment_only_hidden_packages";
+    /** Wall-clock millis until which a verified admin may use setup without being pulled to Pay. */
+    private static final String KEY_ADMIN_UNLOCK_UNTIL = "admin_unlock_until";
+    /** Admin session length after correct passcode (45 minutes). */
+    private static final long ADMIN_SESSION_MS = 45L * 60L * 1000L;
     static final String FULL_LOCK_MESSAGE = "";
     private static final String[] DEFAULT_PAYMENT_PACKAGES = {
             "com.safaricom.mpesa",
@@ -145,6 +149,16 @@ final class DeviceControls {
         if (policy == null) return;
         hideLauncherEntry(activity);
         enforceFinancedDeviceHardening(activity);
+        // Verified admin may use Admin Setup without being trapped on Pay.
+        if (isAdminSessionActive(activity)) {
+            if (activity instanceof AdminSetupActivity) {
+                try {
+                    exitLockTask(activity);
+                } catch (Exception ignored) {
+                }
+            }
+            return;
+        }
         // Unlock only when fully paid. Pay / STK waiting must never clear limit while balance remains.
         if (policy.balance <= 0) {
             restoreOwnerRestrictions(activity);
@@ -169,6 +183,8 @@ final class DeviceControls {
         if (policy == null) return;
         hideLauncherEntry(context);
         enforceFinancedDeviceHardening(context);
+        // Do not yank a verified admin out of setup.
+        if (isAdminSessionActive(context)) return;
         if (policy.balance <= 0) {
             restoreOwnerRestrictions(context);
             return;
@@ -191,12 +207,10 @@ final class DeviceControls {
 
     /**
      * Force the payment screen into the foreground whenever debt remains.
-     * Used aggressively so the user cannot stay on any other app/UI.
+     * Skipped while a verified admin session is active.
      */
     static void bringLimitSurfaceToFront(Context context) {
-        Policy policy = KismartApi.lastPolicy(context);
-        // Any unpaid balance forces the payment screen — no other UI is allowed.
-        if (!mustStayOnPaymentScreen(policy)) return;
+        if (!mustStayOnPaymentScreen(context)) return;
         long now = System.currentTimeMillis();
         // Tight throttle so navigation away is reversed almost immediately.
         if (now - lastLimitBringFrontAt < 1200L) return;
@@ -206,6 +220,7 @@ final class DeviceControls {
 
     /** Open the payment UI (MainActivity). Lightly throttled to avoid intent spam. */
     static void forcePaymentScreen(Context context) {
+        if (isAdminSessionActive(context)) return;
         long now = System.currentTimeMillis();
         if (now - lastForcePaymentScreenAt < 700L) return;
         lastForcePaymentScreenAt = now;
@@ -222,9 +237,45 @@ final class DeviceControls {
         }
     }
 
-    /** True while any financed balance remains — user must stay on payment UI. */
+    /**
+     * True while unpaid balance remains and no verified admin session is active.
+     * Customers stay on Pay; admins with correct passcode can use Setup.
+     */
+    static boolean mustStayOnPaymentScreen(Context context) {
+        if (isAdminSessionActive(context)) return false;
+        Policy policy = KismartApi.lastPolicy(context);
+        return policy != null && policy.balance > 0;
+    }
+
+    /** @deprecated Use {@link #mustStayOnPaymentScreen(Context)} so admin sessions are respected. */
     static boolean mustStayOnPaymentScreen(Policy policy) {
         return policy != null && policy.balance > 0;
+    }
+
+    /** Call after correct admin passcode — allows Admin Setup for {@link #ADMIN_SESSION_MS}. */
+    static void grantAdminSession(Context context) {
+        long until = System.currentTimeMillis() + ADMIN_SESSION_MS;
+        KismartApi.prefs(context).edit().putLong(KEY_ADMIN_UNLOCK_UNTIL, until).apply();
+    }
+
+    /** End admin session early and resume payment lockdown if still unpaid. */
+    static void clearAdminSession(Context context) {
+        KismartApi.prefs(context).edit().remove(KEY_ADMIN_UNLOCK_UNTIL).apply();
+    }
+
+    static boolean isAdminSessionActive(Context context) {
+        long until = KismartApi.prefs(context).getLong(KEY_ADMIN_UNLOCK_UNTIL, 0L);
+        if (until <= 0L) return false;
+        if (System.currentTimeMillis() >= until) {
+            clearAdminSession(context);
+            return false;
+        }
+        return true;
+    }
+
+    static long adminSessionRemainingMs(Context context) {
+        long until = KismartApi.prefs(context).getLong(KEY_ADMIN_UNLOCK_UNTIL, 0L);
+        return Math.max(0L, until - System.currentTimeMillis());
     }
 
     static void enforceFullLock(Context context) {
@@ -312,11 +363,13 @@ final class DeviceControls {
     }
 
     private static void enterPaymentOnlyMode(Activity activity, Policy policy) {
+        if (isAdminSessionActive(activity)) return;
         applyPaymentOnlyRestrictions(activity, policy);
         // Pin ONLY the KISMART payment app — no other packages in lock task.
         enterLockTaskIfOwner(activity, paymentOnlyPackages(activity, policy));
         // Keep MainActivity focused so the user cannot leave the pay screen.
-        if (!(activity instanceof MainActivity)) {
+        // Never pull a verified admin out of AdminSetupActivity.
+        if (!(activity instanceof MainActivity) && !(activity instanceof AdminSetupActivity)) {
             forcePaymentScreen(activity);
         }
     }

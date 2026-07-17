@@ -22,7 +22,7 @@ public class LauncherActivity extends Activity {
                 | Intent.FLAG_ACTIVITY_CLEAR_TOP
                 | Intent.FLAG_ACTIVITY_SINGLE_TOP
                 | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-        intent.putExtra("kismart_payment_lock", DeviceControls.mustStayOnPaymentScreen(policy));
+        intent.putExtra("kismart_payment_lock", DeviceControls.mustStayOnPaymentScreen(this));
         startActivity(intent);
         finish();
     }

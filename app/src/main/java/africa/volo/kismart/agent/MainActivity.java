@@ -58,12 +58,12 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(MainActivity.this);
-            // While unpaid, re-pin payment UI every cycle so nothing else can stay open.
-            if (DeviceControls.mustStayOnPaymentScreen(policy)) {
+            // While unpaid (and not admin), re-pin payment UI every cycle.
+            if (DeviceControls.mustStayOnPaymentScreen(MainActivity.this)) {
                 DeviceControls.applyPolicy(MainActivity.this, policy);
             }
             autoSync();
-            long delay = DeviceControls.mustStayOnPaymentScreen(policy) ? 2000L : 5000L;
+            long delay = DeviceControls.mustStayOnPaymentScreen(MainActivity.this) ? 2000L : 5000L;
             monitorHandler.postDelayed(this, delay);
         }
     };
@@ -106,9 +106,9 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        // Unpaid debt: trap on payment screen — back must not leave KISMART.
+        // Unpaid debt: trap on payment screen — back must not leave KISMART (unless admin session).
         Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
-        if (DeviceControls.mustStayOnPaymentScreen(policy)) {
+        if (DeviceControls.mustStayOnPaymentScreen(this)) {
             DeviceControls.applyPolicy(this, policy);
             setDetail("Payment required. Pay via M-Pesa to unlock this phone.");
             return;
@@ -121,7 +121,7 @@ public class MainActivity extends Activity {
         super.onUserLeaveHint();
         // If the user tries Home/Recents while debt remains, pull them back to Pay.
         Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
-        if (DeviceControls.mustStayOnPaymentScreen(policy)) {
+        if (DeviceControls.mustStayOnPaymentScreen(this)) {
             monitorHandler.postDelayed(() -> DeviceControls.forcePaymentScreen(MainActivity.this), 250L);
             monitorHandler.postDelayed(() -> DeviceControls.applyPolicy(MainActivity.this, policy), 400L);
         }
@@ -131,8 +131,7 @@ public class MainActivity extends Activity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) return;
-        Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
-        if (DeviceControls.mustStayOnPaymentScreen(policy)) {
+        if (DeviceControls.mustStayOnPaymentScreen(this)) {
             monitorHandler.postDelayed(() -> DeviceControls.forcePaymentScreen(MainActivity.this), 200L);
         }
     }
@@ -265,18 +264,24 @@ public class MainActivity extends Activity {
         pin.setHint("Admin passcode");
         new AlertDialog.Builder(this)
                 .setTitle("Admin access")
+                .setMessage("Correct passcode unlocks setup for 45 minutes so you can Sync without being sent back to Pay.")
                 .setView(pin)
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Open", (dialog, which) -> {
-                    String value = pin.getText().toString().trim();
+                    String value = pin.getText() == null ? "" : pin.getText().toString().trim();
                     SharedPreferences prefs = KismartApi.prefs(this);
                     String deviceSecret = prefs.getString(KismartApi.KEY_SECRET, "");
-                    if (ADMIN_PIN.equals(value) || KismartApi.DEFAULT_DEVICE_SECRET.equals(value) || value.equals(deviceSecret)) {
+                    if (ADMIN_PIN.equals(value)
+                            || KismartApi.DEFAULT_DEVICE_SECRET.equals(value)
+                            || (deviceSecret != null && !deviceSecret.isEmpty() && value.equals(deviceSecret))) {
+                        // Grant admin session so payment lockdown does not kick you out of setup.
+                        DeviceControls.grantAdminSession(this);
                         Intent intent = new Intent(this, AdminSetupActivity.class);
                         intent.putExtra(EXTRA_ADMIN_VERIFIED, true);
                         startActivity(intent);
+                        setDetail("Admin unlocked. You can Sync and configure without being sent to Pay.");
                     } else {
-                        setDetail("Admin access denied.");
+                        setDetail("Admin access denied. Check passcode (default 4321 or device sync secret).");
                     }
                 })
                 .show();

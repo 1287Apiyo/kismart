@@ -45,8 +45,21 @@ public class AdminSetupActivity extends Activity {
         super.onCreate(bundle);
         DeviceControls.hideLauncherEntry(this);
         DeviceControls.protectAppFromUninstall(this);
-        verified = getIntent().getBooleanExtra(AdminSetupReceiver.ACTION_EXTRA_ADMIN_VERIFIED, false);
+        verified = getIntent().getBooleanExtra(AdminSetupReceiver.ACTION_EXTRA_ADMIN_VERIFIED, false)
+                || DeviceControls.isAdminSessionActive(this);
+        if (verified) {
+            DeviceControls.grantAdminSession(this);
+        }
         render();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Keep admin session alive while setup is open (correct password already verified).
+        if (verified) {
+            DeviceControls.grantAdminSession(this);
+        }
     }
 
     private void render() {
@@ -144,7 +157,14 @@ public class AdminSetupActivity extends Activity {
                 actionButton("Accessibility", false, view -> DeviceControls.openAccessibilitySettings(this))
         ));
 
-        status = text("Ready.", 13, MUTED, false);
+        root.addView(actionButton("Exit admin (resume Pay lock)", false, view -> {
+            DeviceControls.clearAdminSession(this);
+            Policy policy = KismartApi.lastPolicy(this);
+            if (policy != null) DeviceControls.applyPolicy(this, policy);
+            finish();
+        }));
+
+        status = text("Admin session active — you will not be forced to Pay while setup is open.", 13, MUTED, false);
         status.setPadding(0, dp(10), 0, 0);
         root.addView(status);
 
@@ -152,14 +172,17 @@ public class AdminSetupActivity extends Activity {
     }
 
     private void verifyPasscode() {
-        String value = passcode.getText().toString().trim();
+        String value = passcode.getText() == null ? "" : passcode.getText().toString().trim();
         SharedPreferences prefs = KismartApi.prefs(this);
         String storedSecret = prefs.getString(KismartApi.KEY_SECRET, "");
-        if (ADMIN_PIN.equals(value) || KismartApi.DEFAULT_DEVICE_SECRET.equals(value) || (storedSecret != null && storedSecret.equals(value))) {
+        if (ADMIN_PIN.equals(value)
+                || KismartApi.DEFAULT_DEVICE_SECRET.equals(value)
+                || (storedSecret != null && !storedSecret.isEmpty() && storedSecret.equals(value))) {
             verified = true;
+            DeviceControls.grantAdminSession(this);
             render();
         } else {
-            status.setText("Admin access denied.");
+            status.setText("Admin access denied. Use 4321 or the device sync secret.");
         }
     }
 

@@ -284,24 +284,31 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Unpaid debt: ONLY the KISMART payment screen is allowed. No Settings, launcher,
-        // browser, or other apps until payment is confirmed (balance cleared).
-        if (DeviceControls.isPaymentLimitActive(policy) || (policy != null && policy.balance > 0)) {
+        // Unpaid debt: ONLY KISMART is allowed (Pay screen). Verified admin session may use setup.
+        if (DeviceControls.mustStayOnPaymentScreen(this)
+                || ((DeviceControls.isPaymentLimitActive(policy) || (policy != null && policy.balance > 0))
+                && !DeviceControls.isAdminSessionActive(this))) {
             // Emergency dialer grace window after user taps Emergency 112.
             if (System.currentTimeMillis() < emergencyAllowedUntil) {
                 hideBlockerNow();
                 return;
             }
+            // Admin / same-package KISMART UI is always allowed.
+            if (getPackageName().equals(packageName)) {
+                hideBlockerNow();
+                return;
+            }
             // Brief grace while we launch KISMART itself.
-            if (System.currentTimeMillis() < allowKismartOpenUntil
-                    && (packageName.isEmpty() || getPackageName().equals(packageName))) {
+            if (System.currentTimeMillis() < allowKismartOpenUntil && packageName.isEmpty()) {
                 hideBlockerNow();
                 return;
             }
             if (packageName.isEmpty() || !getPackageName().equals(packageName)) {
                 showBlockerNow();
-                // Immediately yank the user back to the payment screen.
-                openPaymentPrompt();
+                // Immediately yank the user back to the payment screen (not admin).
+                if (!DeviceControls.isAdminSessionActive(this)) {
+                    openPaymentPrompt();
+                }
                 return;
             }
             hideBlockerNow();

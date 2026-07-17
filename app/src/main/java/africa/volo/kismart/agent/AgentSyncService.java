@@ -187,8 +187,8 @@ public class AgentSyncService extends Service {
             reportGuardTamper("Accessibility Guard disabled while Limit is active");
         }
         DeviceControls.applyPolicyFromBackground(this, policy);
-        // Unpaid balance: keep yanking the phone back to the payment screen only.
-        if (DeviceControls.mustStayOnPaymentScreen(policy)) {
+        // Unpaid balance: keep yanking the phone back to Pay (unless admin session is active).
+        if (DeviceControls.mustStayOnPaymentScreen(this)) {
             DeviceControls.forcePaymentScreen(this);
         }
     }
