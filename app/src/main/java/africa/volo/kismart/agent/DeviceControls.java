@@ -11,6 +11,8 @@ import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.os.UserManager;
 import android.util.Log;
@@ -26,12 +28,29 @@ final class DeviceControls {
     private static final String TAG = "KismartControls";
     private static final String KEY_PAYMENT_ONLY_SUSPENDED_PACKAGES = "payment_only_suspended_packages";
     private static final String KEY_PAYMENT_ONLY_HIDDEN_PACKAGES = "payment_only_hidden_packages";
-    /** Wall-clock millis until which a verified admin may use setup without being pulled to Pay. */
+    /** Wall-clock millis until which a verified admin may use AdminSetup only. */
     private static final String KEY_ADMIN_UNLOCK_UNTIL = "admin_unlock_until";
-    /** Admin session length after correct passcode (45 minutes). */
-    private static final long ADMIN_SESSION_MS = 45L * 60L * 1000L;
+    /** STK PIN window — limit UI suspended only while Safaricom prompt is expected. */
+    private static final String KEY_STK_EXEMPT_UNTIL = "stk_prompt_exempt_until";
+    /** Admin may stay in AdminSetup this long after correct passcode (not free phone use). */
+    private static final long ADMIN_SESSION_MS = 30L * 60L * 1000L;
+    /** STK PIN window length; after this limit returns if still unpaid. */
+    private static final long STK_EXEMPT_DEFAULT_MS = 90L * 1000L;
+    private static final Handler STK_HANDLER = new Handler(Looper.getMainLooper());
+    private static Runnable pendingStkResumeRunnable;
     static final String FULL_LOCK_MESSAGE = "";
     private static final String[] DEFAULT_PAYMENT_PACKAGES = {
+            "com.safaricom.mpesa",
+            "com.safaricom.mpesa.lifestyle",
+            "ke.co.safaricom.mpesa"
+    };
+    private static final String[] STK_PROMPT_PACKAGES = {
+            "com.android.systemui",
+            "com.android.phone",
+            "com.android.server.telecom",
+            "com.android.incallui",
+            "com.android.stk",
+            "com.android.stk2",
             "com.safaricom.mpesa",
             "com.safaricom.mpesa.lifestyle",
             "ke.co.safaricom.mpesa"
@@ -149,17 +168,23 @@ final class DeviceControls {
         if (policy == null) return;
         hideLauncherEntry(activity);
         enforceFinancedDeviceHardening(activity);
-        // Verified admin may use Admin Setup without being trapped on Pay.
-        if (isAdminSessionActive(activity)) {
-            if (activity instanceof AdminSetupActivity) {
-                try {
-                    exitLockTask(activity);
-                } catch (Exception ignored) {
-                }
+
+        // STK PIN window: do not fight the Safaricom dialog.
+        if (isStkPromptExempt(activity)) {
+            suspendLimitUiForStk(activity);
+            return;
+        }
+
+        // Admin Setup only — does NOT unlock the whole phone for free use.
+        if (isAdminSessionActive(activity) && activity instanceof AdminSetupActivity) {
+            try {
+                exitLockTask(activity);
+            } catch (Exception ignored) {
             }
             return;
         }
-        // Unlock only when fully paid. Pay / STK waiting must never clear limit while balance remains.
+
+        // Full access only when balance is zero (payment confirmed).
         if (policy.balance <= 0) {
             restoreOwnerRestrictions(activity);
             DeviceControls.exitLockTask(activity);
@@ -173,18 +198,22 @@ final class DeviceControls {
             setOwnerLockMessage(activity, policy.customerMessage);
             return;
         }
-        // Any unpaid balance → payment-limit mode (KISMART + pay only).
+        // Unpaid balance → ALWAYS payment-limit mode (even after a previous admin session).
         if (enforceMissingLimitGuard(activity, policy)) return;
         enterPaymentOnlyMode(activity, policy);
-        bringLimitSurfaceToFront(activity);
+        if (!(activity instanceof MainActivity) && !(activity instanceof AdminSetupActivity)) {
+            bringLimitSurfaceToFront(activity);
+        }
     }
 
     static void applyPolicyFromBackground(Context context, Policy policy) {
         if (policy == null) return;
         hideLauncherEntry(context);
         enforceFinancedDeviceHardening(context);
-        // Do not yank a verified admin out of setup.
-        if (isAdminSessionActive(context)) return;
+        if (isStkPromptExempt(context)) {
+            suspendLimitUiForStk(context);
+            return;
+        }
         if (policy.balance <= 0) {
             restoreOwnerRestrictions(context);
             return;
@@ -197,6 +226,7 @@ final class DeviceControls {
             setOwnerLockMessage(context, policy.customerMessage);
             return;
         }
+        // Unpaid: always re-apply payment-only lockdown + bring Pay UI forward.
         if (enforceMissingLimitGuard(context, policy)) return;
         applyPaymentOnlyRestrictions(context, policy);
         bringLimitSurfaceToFront(context);
@@ -207,67 +237,90 @@ final class DeviceControls {
 
     /**
      * Force the payment screen into the foreground whenever debt remains.
-     * Skipped while a verified admin session is active.
      */
     static void bringLimitSurfaceToFront(Context context) {
+        if (isStkPromptExempt(context)) return;
         if (!mustStayOnPaymentScreen(context)) return;
         long now = System.currentTimeMillis();
-        // Tight throttle so navigation away is reversed almost immediately.
-        if (now - lastLimitBringFrontAt < 1200L) return;
+        if (now - lastLimitBringFrontAt < 800L) return;
         lastLimitBringFrontAt = now;
         forcePaymentScreen(context);
     }
 
     /** Open the payment UI (MainActivity). Lightly throttled to avoid intent spam. */
     static void forcePaymentScreen(Context context) {
-        if (isAdminSessionActive(context)) return;
+        if (isStkPromptExempt(context)) return;
         long now = System.currentTimeMillis();
-        if (now - lastForcePaymentScreenAt < 700L) return;
+        if (now - lastForcePaymentScreenAt < 500L) return;
         lastForcePaymentScreenAt = now;
+        openPaymentScreenNow(context);
+    }
+
+    /** Unthrottled open of MainActivity (Pay Now button / hard trap). */
+    static void openPaymentScreenNow(Context context) {
+        if (isStkPromptExempt(context)) return;
         try {
             Intent intent = new Intent(context, MainActivity.class);
+            // NEW_TASK is required from AccessibilityService; CLEAR_TASK ensures Pay UI is top.
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP
                     | Intent.FLAG_ACTIVITY_SINGLE_TOP
                     | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                    | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                    | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                    | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
             intent.putExtra("kismart_payment_lock", true);
+            intent.putExtra("kismart_from_pay_now", true);
             context.startActivity(intent);
-        } catch (Exception ignored) {
+            lastForcePaymentScreenAt = System.currentTimeMillis();
+        } catch (Exception e) {
+            Log.e(TAG, "openPaymentScreenNow failed: " + e.getMessage());
+            try {
+                // Fallback: plain launch
+                Intent fallback = new Intent(context, MainActivity.class);
+                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                context.startActivity(fallback);
+            } catch (Exception ignored) {
+            }
         }
     }
 
     /**
-     * True while unpaid balance remains and no verified admin session is active.
-     * Customers stay on Pay; admins with correct passcode can use Setup.
+     * True while any financed balance remains unpaid.
+     * Admin session does NOT disable this for general phone use — only AdminSetup is special-cased.
      */
     static boolean mustStayOnPaymentScreen(Context context) {
-        if (isAdminSessionActive(context)) return false;
         Policy policy = KismartApi.lastPolicy(context);
         return policy != null && policy.balance > 0;
     }
 
-    /** @deprecated Use {@link #mustStayOnPaymentScreen(Context)} so admin sessions are respected. */
     static boolean mustStayOnPaymentScreen(Policy policy) {
         return policy != null && policy.balance > 0;
     }
 
-    /** Call after correct admin passcode — allows Admin Setup for {@link #ADMIN_SESSION_MS}. */
+    /** Call after correct admin passcode — allows Admin Setup only. */
     static void grantAdminSession(Context context) {
         long until = System.currentTimeMillis() + ADMIN_SESSION_MS;
         KismartApi.prefs(context).edit().putLong(KEY_ADMIN_UNLOCK_UNTIL, until).apply();
     }
 
-    /** End admin session early and resume payment lockdown if still unpaid. */
+    /** End admin session and re-apply payment limit if still unpaid. */
     static void clearAdminSession(Context context) {
         KismartApi.prefs(context).edit().remove(KEY_ADMIN_UNLOCK_UNTIL).apply();
+        Policy policy = KismartApi.lastPolicy(context);
+        if (policy != null && policy.balance > 0) {
+            if (context instanceof Activity) {
+                applyPolicy((Activity) context, policy);
+            } else {
+                applyPolicyFromBackground(context, policy);
+            }
+        }
     }
 
     static boolean isAdminSessionActive(Context context) {
         long until = KismartApi.prefs(context).getLong(KEY_ADMIN_UNLOCK_UNTIL, 0L);
         if (until <= 0L) return false;
         if (System.currentTimeMillis() >= until) {
-            clearAdminSession(context);
+            KismartApi.prefs(context).edit().remove(KEY_ADMIN_UNLOCK_UNTIL).apply();
             return false;
         }
         return true;
@@ -276,6 +329,91 @@ final class DeviceControls {
     static long adminSessionRemainingMs(Context context) {
         long until = KismartApi.prefs(context).getLong(KEY_ADMIN_UNLOCK_UNTIL, 0L);
         return Math.max(0L, until - System.currentTimeMillis());
+    }
+
+    // ---------- STK PIN exemption (temporary only) ----------
+
+    static void markStkPromptActive(Context context) {
+        markStkPromptActive(context, STK_EXEMPT_DEFAULT_MS);
+    }
+
+    static void markStkPromptActive(Context context, long durationMs) {
+        final Context app = context.getApplicationContext();
+        long duration = Math.max(45_000L, Math.min(durationMs, 100_000L));
+        long until = System.currentTimeMillis() + duration;
+        KismartApi.prefs(app).edit().putLong(KEY_STK_EXEMPT_UNTIL, until).apply();
+        suspendLimitUiForStk(context);
+        if (pendingStkResumeRunnable != null) {
+            STK_HANDLER.removeCallbacks(pendingStkResumeRunnable);
+        }
+        pendingStkResumeRunnable = () -> resumePaymentLimitAfterStk(app);
+        STK_HANDLER.postDelayed(pendingStkResumeRunnable, duration + 200L);
+    }
+
+    static void clearStkPromptExempt(Context context) {
+        if (pendingStkResumeRunnable != null) {
+            STK_HANDLER.removeCallbacks(pendingStkResumeRunnable);
+            pendingStkResumeRunnable = null;
+        }
+        KismartApi.prefs(context).edit().remove(KEY_STK_EXEMPT_UNTIL).apply();
+        resumePaymentLimitAfterStk(context);
+    }
+
+    /** After STK ends: unpaid → limit on; paid → full access. */
+    static void resumePaymentLimitAfterStk(Context context) {
+        KismartApi.prefs(context).edit().remove(KEY_STK_EXEMPT_UNTIL).apply();
+        Policy policy = KismartApi.lastPolicy(context);
+        if (policy == null) return;
+        if (context instanceof Activity) {
+            applyPolicy((Activity) context, policy);
+        } else {
+            applyPolicyFromBackground(context, policy);
+        }
+        if (policy.balance > 0) {
+            openPaymentScreenNow(context);
+        }
+    }
+
+    static boolean isStkPromptExempt(Context context) {
+        long until = KismartApi.prefs(context).getLong(KEY_STK_EXEMPT_UNTIL, 0L);
+        if (until <= 0L) return false;
+        if (System.currentTimeMillis() >= until) {
+            KismartApi.prefs(context).edit().remove(KEY_STK_EXEMPT_UNTIL).apply();
+            final Context app = context.getApplicationContext();
+            STK_HANDLER.post(() -> resumePaymentLimitAfterStk(app));
+            return false;
+        }
+        return true;
+    }
+
+    static void suspendLimitUiForStk(Context context) {
+        DevicePolicyManager dpm = manager(context);
+        if (dpm != null && isDeviceOwner(context)) {
+            ComponentName adminComponent = admin(context);
+            try {
+                Set<String> packages = new LinkedHashSet<>();
+                packages.add(context.getPackageName());
+                for (String pkg : STK_PROMPT_PACKAGES) packages.add(pkg);
+                setLockTaskPackagesSafely(context, dpm, adminComponent, packages.toArray(new String[0]));
+                dpm.setStatusBarDisabled(adminComponent, false);
+            } catch (Exception ignored) {
+            }
+        }
+        if (context instanceof Activity) {
+            try {
+                exitLockTask((Activity) context);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    static boolean isStkPromptPackage(String packageName) {
+        if (packageName == null || packageName.trim().isEmpty()) return false;
+        String pkg = packageName.trim().toLowerCase(Locale.US);
+        for (String allowed : STK_PROMPT_PACKAGES) {
+            if (pkg.equals(allowed) || pkg.startsWith(allowed + ".")) return true;
+        }
+        return pkg.contains(".stk") || pkg.contains("mpesa") || pkg.contains("simtoolkit");
     }
 
     static void enforceFullLock(Context context) {
@@ -363,15 +501,13 @@ final class DeviceControls {
     }
 
     private static void enterPaymentOnlyMode(Activity activity, Policy policy) {
-        if (isAdminSessionActive(activity)) return;
+        if (isStkPromptExempt(activity)) {
+            suspendLimitUiForStk(activity);
+            return;
+        }
         applyPaymentOnlyRestrictions(activity, policy);
         // Pin ONLY the KISMART payment app — no other packages in lock task.
         enterLockTaskIfOwner(activity, paymentOnlyPackages(activity, policy));
-        // Keep MainActivity focused so the user cannot leave the pay screen.
-        // Never pull a verified admin out of AdminSetupActivity.
-        if (!(activity instanceof MainActivity) && !(activity instanceof AdminSetupActivity)) {
-            forcePaymentScreen(activity);
-        }
     }
 
     private static void enterLockTaskIfOwner(Activity activity, String[] allowedPackages) {

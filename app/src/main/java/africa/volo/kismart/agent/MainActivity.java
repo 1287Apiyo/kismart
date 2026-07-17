@@ -264,7 +264,7 @@ public class MainActivity extends Activity {
         pin.setHint("Admin passcode");
         new AlertDialog.Builder(this)
                 .setTitle("Admin access")
-                .setMessage("Correct passcode unlocks setup for 45 minutes so you can Sync without being sent back to Pay.")
+                .setMessage("Correct passcode opens Admin Setup only. Payment limit stays on for normal phone use until the account is paid.")
                 .setView(pin)
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Open", (dialog, which) -> {
@@ -274,12 +274,11 @@ public class MainActivity extends Activity {
                     if (ADMIN_PIN.equals(value)
                             || KismartApi.DEFAULT_DEVICE_SECRET.equals(value)
                             || (deviceSecret != null && !deviceSecret.isEmpty() && value.equals(deviceSecret))) {
-                        // Grant admin session so payment lockdown does not kick you out of setup.
                         DeviceControls.grantAdminSession(this);
                         Intent intent = new Intent(this, AdminSetupActivity.class);
                         intent.putExtra(EXTRA_ADMIN_VERIFIED, true);
                         startActivity(intent);
-                        setDetail("Admin unlocked. You can Sync and configure without being sent to Pay.");
+                        setDetail("Admin Setup open. Leave setup to resume payment limit.");
                     } else {
                         setDetail("Admin access denied. Check passcode (default 4321 or device sync secret).");
                     }
@@ -373,10 +372,8 @@ public class MainActivity extends Activity {
         if (paymentButton != null) paymentButton.setEnabled(false);
         setDetail("Sending M-Pesa STK prompt...");
         paymentBalanceBefore = latestPolicy == null ? 0 : latestPolicy.balance;
-        // Keep limit active while we request STK — never unlock just because Pay was tapped.
-        if (latestPolicy != null && latestPolicy.balance > 0) {
-            DeviceControls.applyPolicy(this, latestPolicy);
-        }
+        // Suspend limit UI only while STK PIN is expected (not permanent unlock).
+        DeviceControls.markStkPromptActive(this, 90_000L);
         executor.execute(() -> {
             try {
                 JSONObject result = KismartApi.submitPaybillStk(this, amount, phoneNumber);
@@ -396,23 +393,21 @@ public class MainActivity extends Activity {
                 }
                 final Policy policyToApply = returnedPolicy;
                 runOnUiThread(() -> {
+                    DeviceControls.markStkPromptActive(this, 90_000L);
                     if (policyToApply != null) {
-                        DeviceControls.applyPolicy(this, policyToApply);
+                        latestPolicy = policyToApply;
                         renderPolicy(policyToApply);
-                    } else if (latestPolicy != null && latestPolicy.balance > 0) {
-                        DeviceControls.applyPolicy(this, latestPolicy);
                     }
                     paymentPending = true;
                     paymentPollAttempts = 0;
+                    updatePaymentButton(latestPolicy);
                     setDetail(message + (sentTo == null || sentTo.isEmpty() ? "" : " (" + sentTo + ")"));
-                    schedulePaymentPoll(3000);
+                    schedulePaymentPoll(5000);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
                     paymentPending = false;
-                    if (latestPolicy != null && latestPolicy.balance > 0) {
-                        DeviceControls.applyPolicy(this, latestPolicy);
-                    }
+                    DeviceControls.clearStkPromptExempt(this);
                     updatePaymentButton(latestPolicy);
                     setDetail("Payment request failed: " + error.getMessage());
                 });
@@ -433,49 +428,56 @@ public class MainActivity extends Activity {
             try {
                 Policy policy = KismartApi.sync(this);
                 runOnUiThread(() -> {
-                    // Always re-apply limit while unpaid — STK wait must not free the phone.
-                    DeviceControls.applyPolicy(this, policy);
                     renderPolicy(policy);
                     boolean paidDown = policy.balance < paymentBalanceBefore;
                     boolean cleared = policy.balance <= 0;
                     if (paidDown || cleared) {
                         paymentPending = false;
                         monitorHandler.removeCallbacks(paymentPollRunnable);
+                        DeviceControls.clearStkPromptExempt(this);
                         setDetail(cleared
-                                ? "Payment confirmed. Account is fully paid."
+                                ? "Payment confirmed. Full access restored."
                                 : "Payment confirmed. Balance updated to " + formatKes(policy.balance) + ".");
                         return;
                     }
                     if (policy.isPendingStkFailed()) {
                         paymentPending = false;
                         monitorHandler.removeCallbacks(paymentPollRunnable);
+                        DeviceControls.clearStkPromptExempt(this);
                         updatePaymentButton(policy);
                         String fail = policy.pendingStkMessage;
                         if (fail == null || fail.trim().isEmpty()) {
-                            fail = "M-Pesa did not confirm the payment prompt.";
+                            fail = "M-Pesa did not confirm the payment.";
                         }
-                        setDetail("M-Pesa STK failed: " + fail + " Limit stays on until you pay. Tap Pay to try again.");
+                        setDetail("Payment not confirmed: " + fail + " Limit is on.");
                         return;
                     }
-                    if (paymentPollAttempts >= 20) {
+                    // Do not re-apply limit while STK PIN window is open (avoids flicker).
+                    if (!DeviceControls.isStkPromptExempt(this) && policy.balance > 0) {
+                        DeviceControls.applyPolicy(this, policy);
+                    }
+                    if (paymentPollAttempts >= 18) {
                         paymentPending = false;
+                        DeviceControls.clearStkPromptExempt(this);
                         updatePaymentButton(policy);
-                        setDetail("Still waiting for M-Pesa. If no PIN dialog appeared, tap Pay again. Limit stays on until payment is confirmed.");
+                        setDetail("Payment not confirmed yet. Limit stays on. Tap Pay to try again.");
                         return;
                     }
-                    schedulePaymentPoll(4000);
+                    schedulePaymentPoll(5000);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
-                    if (latestPolicy != null && latestPolicy.balance > 0) {
-                        DeviceControls.applyPolicy(this, latestPolicy);
+                    if (DeviceControls.isStkPromptExempt(this) && paymentPollAttempts < 18) {
+                        schedulePaymentPoll(5000);
+                        return;
                     }
-                    if (paymentPollAttempts >= 20) {
+                    if (paymentPollAttempts >= 18) {
                         paymentPending = false;
+                        DeviceControls.clearStkPromptExempt(this);
                         updatePaymentButton(latestPolicy);
-                        setDetail("Could not confirm payment yet. Limit stays on. Check M-Pesa, then tap Pay or Sync.");
+                        setDetail("Could not confirm payment. Limit stays on.");
                     } else {
-                        schedulePaymentPoll(4000);
+                        schedulePaymentPoll(5000);
                     }
                 });
             }

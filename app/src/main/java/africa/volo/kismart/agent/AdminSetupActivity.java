@@ -62,6 +62,13 @@ public class AdminSetupActivity extends Activity {
         }
     }
 
+    @Override
+    protected void onDestroy() {
+        // Leaving admin always restores payment limit if still unpaid.
+        DeviceControls.clearAdminSession(this);
+        super.onDestroy();
+    }
+
     private void render() {
         if (verified) {
             setContentView(buildSetupUi());

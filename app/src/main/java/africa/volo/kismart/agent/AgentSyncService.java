@@ -52,10 +52,16 @@ public class AgentSyncService extends Service {
     private final Runnable syncRunnable = new Runnable() {
         @Override
         public void run() {
+            // STK PIN open: do not re-apply limit (PIN must not fight overlay).
+            if (DeviceControls.isStkPromptExempt(AgentSyncService.this)) {
+                handler.postDelayed(this, 3000L);
+                return;
+            }
             // Re-apply last known limit immediately (offline-safe) before waiting on network sync.
             enforceLastKnownPolicy();
             syncOnce();
-            long delay = DeviceControls.isPaymentLimitActive(KismartApi.lastPolicy(AgentSyncService.this))
+            long delay = DeviceControls.mustStayOnPaymentScreen(AgentSyncService.this)
+                    || DeviceControls.isPaymentLimitActive(KismartApi.lastPolicy(AgentSyncService.this))
                     || DeviceControls.isFullLockPolicy(KismartApi.lastPolicy(AgentSyncService.this))
                     ? SYNC_INTERVAL_LIMIT_MS
                     : SYNC_INTERVAL_MS;
@@ -186,10 +192,11 @@ public class AgentSyncService extends Service {
             showProtectionRequiredNotification();
             reportGuardTamper("Accessibility Guard disabled while Limit is active");
         }
+        if (DeviceControls.isStkPromptExempt(this)) return;
         DeviceControls.applyPolicyFromBackground(this, policy);
-        // Unpaid balance: keep yanking the phone back to Pay (unless admin session is active).
+        // Unpaid balance: keep yanking the phone back to Pay.
         if (DeviceControls.mustStayOnPaymentScreen(this)) {
-            DeviceControls.forcePaymentScreen(this);
+            DeviceControls.openPaymentScreenNow(this);
         }
     }
 
