@@ -11,7 +11,7 @@ This pilot APK allows local `http://` traffic so phones can reach a laptop backe
 - Enable Android Device Admin for screen-lock testing.
 - Pull policy from `/api/devices/:imei/policy`.
 - Acknowledge pending lock/restore commands through `/api/devices/:imei/sync`.
-- Keep enforcing the last synced admin policy while offline, then apply queued admin commands when the phone returns to the same network as the backend.
+- Keep enforcing the last synced admin policy while offline, then apply queued admin commands when the phone regains any internet path to the public control URL.
 - Use a fast sync path so the phone does not wait on a full Firestore collection save.
 - Send a phone identity bundle on every device request: app install ID, Android ID, build fingerprint, server-issued binding token, manufacturer, brand, model, and SDK level.
 - Report tamper/removal attempts through `/api/devices/:imei/tamper`.
@@ -21,7 +21,7 @@ This pilot APK allows local `http://` traffic so phones can reach a laptop backe
 - Keep checking the backend for admin restore while locked.
 - In Device Owner mode, restrict app uninstall/control, credential settings, safe boot, app installs, and user/account changes during full lock.
 - Keep payment figures backend-authoritative; the phone app does not accept customer-entered amounts or trusted balances.
-- Protect against IMEI spoofing by letting the backend bind the first trusted sync to the phone identity. A different phone using the same IMEI is blocked until an admin resets the device identity binding.
+- Protect against IMEI spoofing by binding the first trusted sync to the handset Android ID + binding token. Reinstalls on the **same** phone recover automatically. A **different** physical phone using the same IMEI is blocked until admin Reset ID.
 
 ## Platform Reality
 
@@ -44,15 +44,15 @@ device-agent/dist/KismartDeviceAgent-debug.apk
 
 2. Build and install this Android project from Android Studio.
 
-3. On a real phone, use the laptop LAN IP, not `localhost`.
-
-   Example:
+3. On a real phone, use the **public HTTPS control URL** so lock/restore works from mobile data and any Wi-Fi (not only the shop LAN):
 
    ```text
-   http://192.168.100.16:8787
+   https://kismartsystem.vercel.app
    ```
 
-   On the Android emulator, use:
+   Temporary laptop-only testing can still use a LAN IP such as `http://192.168.x.x:8787`. After the first successful sync the agent adopts the server `controlEndpoint` public URL automatically.
+
+   On the Android emulator against a laptop backend, use:
 
    ```text
    http://10.0.2.2:8787
@@ -64,10 +64,10 @@ device-agent/dist/KismartDeviceAgent-debug.apk
    357527486213862
    ```
 
-   For this local pilot backend, the device sync secret is:
+   Device sync secret (must match `KISMART_DEVICE_SYNC_SECRET` on the backend):
 
    ```text
-   change-this-device-secret
+   4321
    ```
 
 5. Tap **Use Demo Values** if you want the app to fill these values automatically.

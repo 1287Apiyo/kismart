@@ -16,6 +16,7 @@ import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.UUID;
 
 final class KismartApi {
@@ -28,11 +29,23 @@ final class KismartApi {
     static final String KEY_INSTALL_ID = "install_id";
     static final String KEY_BINDING_TOKEN = "binding_token";
     private static final String KEY_APPLIED_COMMAND_IDS = "applied_command_ids";
-    static final String APP_VERSION = "android-1.0.34";
-    static final String DEFAULT_SERVER_URL = "http://192.168.98.3:8787";
-    private static final String LEGACY_SERVER_URL = "http://192.168.98.7:8787";
+    static final String APP_VERSION = "android-1.0.43";
+    /**
+     * Public HTTPS control plane. Phones must use this (or another public host) so lock/restore
+     * works from mobile data and any Wi-Fi, not only the shop LAN.
+     */
+    static final String DEFAULT_SERVER_URL = "https://kismartsystem.vercel.app";
+    private static final String[] STALE_SERVER_URLS = {
+            "http://192.168.98.3:8787",
+            "http://192.168.98.7:8787",
+            "http://192.168.100.16:8787",
+            "http://10.0.2.2:8787",
+            "http://localhost:8787",
+            "http://127.0.0.1:8787"
+    };
     static final String DEFAULT_IMEI = "357527486213862";
-    static final String DEFAULT_DEVICE_SECRET = "change-this-device-secret";
+    /** Must match server KISMART_DEVICE_SYNC_SECRET (local .env and production). */
+    static final String DEFAULT_DEVICE_SECRET = "4321";
     private static final int CONNECT_TIMEOUT_MS = 20000;
     private static final int READ_TIMEOUT_MS = 30000;
 
@@ -145,7 +158,7 @@ final class KismartApi {
     static String serverUrl(Context context) {
         SharedPreferences prefs = prefs(context);
         String cleaned = cleanBaseUrl(prefs.getString(KEY_SERVER_URL, ""));
-        if (cleaned.isEmpty() || LEGACY_SERVER_URL.equals(cleaned)) {
+        if (cleaned.isEmpty() || isStaleServerUrl(cleaned)) {
             if (!DEFAULT_SERVER_URL.equals(cleaned)) {
                 prefs.edit().putString(KEY_SERVER_URL, DEFAULT_SERVER_URL).apply();
             }
@@ -163,9 +176,10 @@ final class KismartApi {
             connection.setReadTimeout(READ_TIMEOUT_MS);
             connection.setRequestProperty("Content-Type", "application/json");
             String secret = prefs(context).getString(KEY_SECRET, "");
-            if (secret != null && !secret.trim().isEmpty()) {
-                connection.setRequestProperty("X-KISMART-Device-Secret", secret.trim());
+            if (secret == null || secret.trim().isEmpty()) {
+                secret = DEFAULT_DEVICE_SECRET;
             }
+            connection.setRequestProperty("X-KISMART-Device-Secret", secret.trim());
             addDeviceIdentityHeaders(context, connection);
             if (body != null) {
                 connection.setDoOutput(true);
@@ -182,7 +196,7 @@ final class KismartApi {
                     throw new IllegalStateException("Device sync secret is wrong. Enter: " + DEFAULT_DEVICE_SECRET);
                 }
                 if (response.contains("Device identity mismatch")) {
-                    throw new IllegalStateException("This IMEI is already bound to another phone identity. Ask the admin to verify this handset and reset Device ID.");
+                    throw new IllegalStateException("This IMEI is bound to another handset. Same-phone reinstalls recover automatically; only a different physical phone needs admin Reset ID.");
                 }
                 if (response.contains("Device identity is missing")) {
                     throw new IllegalStateException("Device identity is missing. Reinstall the latest KISMART agent and sync again.");
@@ -191,7 +205,19 @@ final class KismartApi {
             }
             return new JSONObject(response);
         } catch (SocketTimeoutException error) {
-            throw new IllegalStateException("Sync timed out. Confirm the backend is running at " + DEFAULT_SERVER_URL + " and the phone is on the same Wi-Fi.", error);
+            throw new IllegalStateException(
+                    "Sync timed out reaching " + serverUrl(context)
+                            + ". Use the public HTTPS URL so the phone works on any network (not only shop Wi-Fi).",
+                    error
+            );
+        } catch (IllegalStateException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new IllegalStateException(
+                    "Cannot reach control server at " + serverUrl(context)
+                            + ". Confirm internet access and that the backend is online.",
+                    error
+            );
         } finally {
             if (connection != null) connection.disconnect();
         }
@@ -215,7 +241,7 @@ final class KismartApi {
     private static JSONObject deviceIdentity(Context context) throws Exception {
         JSONObject identity = new JSONObject();
         identity.put("installId", installId(context));
-        identity.put("androidId", valueOrFallback(Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID), "android-" + installId(context)));
+        identity.put("androidId", stableAndroidId(context));
         identity.put("fingerprint", valueOrFallback(Build.FINGERPRINT, "fingerprint-" + Build.MODEL));
         identity.put("bindingToken", bindingToken(context));
         identity.put("manufacturer", valueOrFallback(Build.MANUFACTURER, "unknown"));
@@ -223,6 +249,22 @@ final class KismartApi {
         identity.put("model", valueOrFallback(Build.MODEL, "unknown"));
         identity.put("sdk", String.valueOf(Build.VERSION.SDK_INT));
         return identity;
+    }
+
+    /**
+     * Prefer the platform ANDROID_ID (stable across reinstalls on the same handset).
+     * Never fall back to installId-derived values that change after wipe — that forced admins to Reset ID.
+     */
+    private static String stableAndroidId(Context context) {
+        String androidId = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID);
+        if (androidId != null) {
+            String cleaned = androidId.trim();
+            if (!cleaned.isEmpty() && !"9774d56d682e549c".equalsIgnoreCase(cleaned)) {
+                return cleaned.toLowerCase(Locale.US);
+            }
+        }
+        // Last resort: persistent install-scoped id stored in prefs (survives process death, not full data wipe).
+        return "aid-" + installId(context);
     }
 
     private static String installId(Context context) {
@@ -252,6 +294,24 @@ final class KismartApi {
         editor.putString(KEY_LAST_POLICY, policy.toString());
         editor.putLong(KEY_LAST_POLICY_AT, System.currentTimeMillis());
         editor.apply();
+        adoptControlEndpoint(context, policy.optString("controlEndpoint", ""));
+    }
+
+    /**
+     * After a successful sync, move the agent from temporary LAN URLs onto the public control URL
+     * so lock/restore continues when the phone leaves the shop network.
+     */
+    private static void adoptControlEndpoint(Context context, String endpoint) {
+        String cleaned = cleanBaseUrl(endpoint);
+        if (cleaned.isEmpty()) return;
+        if (!cleaned.startsWith("https://") && !cleaned.startsWith("http://")) return;
+        SharedPreferences prefs = prefs(context);
+        String current = cleanBaseUrl(prefs.getString(KEY_SERVER_URL, ""));
+        if (current.isEmpty() || isStaleServerUrl(current) || isPrivateLanUrl(current)) {
+            if (!cleaned.equals(current)) {
+                prefs.edit().putString(KEY_SERVER_URL, cleaned).apply();
+            }
+        }
     }
 
     private static JSONArray pendingAppliedCommandIds(Context context) {
@@ -311,10 +371,34 @@ final class KismartApi {
     private static String cleanBaseUrl(String value) {
         String cleaned = value == null ? "" : value.trim();
         if (!cleaned.isEmpty() && !cleaned.startsWith("http://") && !cleaned.startsWith("https://")) {
-            cleaned = "http://" + cleaned;
+            cleaned = "https://" + cleaned;
         }
         while (cleaned.endsWith("/")) cleaned = cleaned.substring(0, cleaned.length() - 1);
         return cleaned;
+    }
+
+    private static boolean isStaleServerUrl(String value) {
+        String cleaned = cleanBaseUrl(value);
+        for (String stale : STALE_SERVER_URLS) {
+            if (stale.equalsIgnoreCase(cleaned)) return true;
+        }
+        return false;
+    }
+
+    private static boolean isPrivateLanUrl(String value) {
+        String cleaned = cleanBaseUrl(value).toLowerCase(Locale.US);
+        if (!cleaned.startsWith("http://")) return false;
+        return cleaned.contains("://192.168.")
+                || cleaned.contains("://10.")
+                || cleaned.contains("://172.16.")
+                || cleaned.contains("://172.17.")
+                || cleaned.contains("://172.18.")
+                || cleaned.contains("://172.19.")
+                || cleaned.contains("://172.2")
+                || cleaned.contains("://172.3")
+                || cleaned.contains("://localhost")
+                || cleaned.contains("://127.0.0.1")
+                || cleaned.contains("://10.0.2.2");
     }
 
     private static String encode(String value) {
