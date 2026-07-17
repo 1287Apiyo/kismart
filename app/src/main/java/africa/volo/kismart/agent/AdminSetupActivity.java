@@ -12,6 +12,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -86,6 +87,15 @@ public class AdminSetupActivity extends Activity {
         root.setPadding(dp(24), dp(24), dp(24), dp(24));
         root.setBackgroundColor(WHITE);
 
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.logo);
+        logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        logo.setContentDescription("KISMART");
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(72), dp(72));
+        logoParams.gravity = Gravity.CENTER_HORIZONTAL;
+        logoParams.bottomMargin = dp(16);
+        root.addView(logo, logoParams);
+
         TextView title = text("Device Service", 24, BLACK, true);
         title.setGravity(Gravity.CENTER);
         root.addView(title, matchWrap(0, 8));
@@ -128,9 +138,20 @@ public class AdminSetupActivity extends Activity {
         root.setPadding(dp(20), dp(20), dp(20), dp(24));
         scroll.addView(root);
 
+        LinearLayout brand = new LinearLayout(this);
+        brand.setOrientation(LinearLayout.HORIZONTAL);
+        brand.setGravity(Gravity.CENTER_VERTICAL);
+        brand.setPadding(0, 0, 0, dp(14));
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.logo);
+        logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        logo.setContentDescription("KISMART");
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(44), dp(44));
+        logoParams.setMargins(0, 0, dp(12), 0);
+        brand.addView(logo, logoParams);
         TextView title = text("Admin Setup", 22, BLACK, true);
-        title.setPadding(0, 0, 0, dp(12));
-        root.addView(title);
+        brand.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        root.addView(brand);
 
         adminStatus = text("", 13, MUTED, false);
         adminStatus.setPadding(0, 0, 0, dp(14));

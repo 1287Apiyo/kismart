@@ -16,6 +16,7 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -847,6 +848,14 @@ public class KismartAccessibilityService extends AccessibilityService {
         int side = dp(28);
         content.setPadding(side, side, side, side);
 
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.logo);
+        logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        logo.setContentDescription("KISMART");
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(72), dp(72));
+        logoParams.gravity = Gravity.CENTER_HORIZONTAL;
+        logoParams.bottomMargin = dp(16);
+
         TextView title = new TextView(this);
         title.setText("PAYMENT REQUIRED");
         title.setTextColor(Color.rgb(10, 15, 13));
@@ -881,6 +890,7 @@ public class KismartAccessibilityService extends AccessibilityService {
             DeviceControls.callEmergency(this);
         });
 
+        content.addView(logo, logoParams);
         content.addView(title, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         content.addView(message, spacedParams());

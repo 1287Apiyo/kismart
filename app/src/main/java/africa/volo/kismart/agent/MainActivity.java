@@ -13,9 +13,11 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -51,22 +53,28 @@ public class MainActivity extends Activity {
     private Policy latestPolicy;
     private boolean syncing;
     private boolean paymentPending;
+    private boolean activityResumed;
+    private boolean windowHasFocus;
+    private boolean lockTaskPinned;
     private int paymentPollAttempts;
     private int paymentBalanceBefore;
 
     private final Runnable monitorRunnable = new Runnable() {
         @Override
         public void run() {
-            Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(MainActivity.this);
-            // Unpaid: stay locked on payment UI (except brief STK PIN window).
-            if (DeviceControls.mustStayOnPaymentScreen(MainActivity.this)
-                    && !DeviceControls.isStkPromptExempt(MainActivity.this)) {
-                DeviceControls.applyPolicy(MainActivity.this, policy);
-            }
+            // Sync only — do NOT re-apply lock-task every second (that eats Pay button taps).
             autoSync();
-            long delay = DeviceControls.mustStayOnPaymentScreen(MainActivity.this) ? 1000L : 5000L;
+            long delay = paymentLockActive() ? 2500L : 5000L;
             monitorHandler.postDelayed(this, delay);
         }
+    };
+
+    private final Runnable reassertIfLeftRunnable = () -> {
+        // Only re-open if we truly left this screen (not focus glitches from dialogs/lock-task).
+        if (activityResumed && windowHasFocus) return;
+        if (!paymentLockActive()) return;
+        if (DeviceControls.isStkPromptExempt(MainActivity.this)) return;
+        DeviceControls.openPaymentScreenNow(MainActivity.this);
     };
 
     @Override
@@ -79,6 +87,8 @@ public class MainActivity extends Activity {
         DeviceControls.enforceFinancedDeviceHardening(this);
         DeviceControls.protectAppFromUninstall(this);
         renderPolicy(KismartApi.lastPolicy(this));
+        // Pin once on open so the screen cannot be left, without thrashing touches.
+        pinPaymentScreenOnce();
         AgentSyncService.start(this);
         monitorHandler.postDelayed(monitorRunnable, 1500L);
     }
@@ -93,6 +103,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        activityResumed = true;
+        monitorHandler.removeCallbacks(reassertIfLeftRunnable);
         if (openLockScreenIfFullLockActive()) return;
         DeviceControls.enforceFinancedDeviceHardening(this);
         DeviceControls.protectAppFromUninstall(this);
@@ -101,44 +113,148 @@ public class MainActivity extends Activity {
             if (DeviceControls.enforceMissingProtectionGuard(this, policy)) return;
             latestPolicy = policy;
             renderPolicy(policy);
-            DeviceControls.applyPolicy(this, policy);
+            // Apply restrictions without repeatedly restarting lock-task while user is here.
+            pinPaymentScreenOnce();
         }
+        ensurePayButtonClickable();
+    }
+
+    @Override
+    protected void onPause() {
+        activityResumed = false;
+        super.onPause();
+        // Unpaid: if user actually leaves (Home/Recents), pull back after a short settle delay.
+        // Do not fire immediately — that restarts MainActivity and kills Pay button taps.
+        scheduleReturnIfLeft(500L);
     }
 
     @Override
     public void onBackPressed() {
         // Unpaid: never leave payment screen (STK PIN is handled by system dialog on top).
-        Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
-        if (DeviceControls.mustStayOnPaymentScreen(this)) {
-            if (!DeviceControls.isStkPromptExempt(this)) {
-                DeviceControls.applyPolicy(this, policy);
-            }
-            setDetail("Payment required. Complete M-Pesa payment to unlock this phone.");
+        if (paymentLockActive()) {
+            setDetail("Payment required. Tap Pay via M-Pesa and complete payment to unlock.");
+            ensurePayButtonClickable();
             return;
         }
         super.onBackPressed();
     }
 
     @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (paymentLockActive()
+                && (keyCode == KeyEvent.KEYCODE_BACK
+                || keyCode == KeyEvent.KEYCODE_APP_SWITCH
+                || keyCode == KeyEvent.KEYCODE_HOME)) {
+            setDetail("Payment required. Tap Pay via M-Pesa and complete payment to unlock.");
+            ensurePayButtonClickable();
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (paymentLockActive()
+                && (keyCode == KeyEvent.KEYCODE_BACK
+                || keyCode == KeyEvent.KEYCODE_APP_SWITCH
+                || keyCode == KeyEvent.KEYCODE_HOME)) {
+            return true;
+        }
+        return super.onKeyUp(keyCode, event);
+    }
+
+    @Override
+    public boolean moveTaskToBack(boolean nonRoot) {
+        if (paymentLockActive() && !DeviceControls.isStkPromptExempt(this)) {
+            setDetail("Payment required. Tap Pay via M-Pesa and complete payment to unlock.");
+            ensurePayButtonClickable();
+            return true;
+        }
+        return super.moveTaskToBack(nonRoot);
+    }
+
+    @Override
+    public void finish() {
+        // Unpaid: do not close this screen until M-Pesa payment is confirmed.
+        if (paymentLockActive()) {
+            setDetail("Payment required. Tap Pay via M-Pesa and complete payment to unlock.");
+            ensurePayButtonClickable();
+            return;
+        }
+        super.finish();
+    }
+
+    /** Only path allowed to close MainActivity while balance remains (e.g. full lock handoff). */
+    private void forceFinish() {
+        super.finish();
+    }
+
+    @Override
     protected void onUserLeaveHint() {
         super.onUserLeaveHint();
-        // Unpaid: pull back to Pay immediately (allow STK PIN window only).
-        Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
-        if (DeviceControls.mustStayOnPaymentScreen(this) && !DeviceControls.isStkPromptExempt(this)) {
-            monitorHandler.postDelayed(() -> DeviceControls.openPaymentScreenNow(MainActivity.this), 100L);
-            monitorHandler.postDelayed(() -> DeviceControls.applyPolicy(MainActivity.this, policy), 200L);
-            monitorHandler.postDelayed(() -> DeviceControls.openPaymentScreenNow(MainActivity.this), 500L);
-        }
+        scheduleReturnIfLeft(350L);
     }
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) return;
+        windowHasFocus = hasFocus;
+        if (hasFocus) {
+            monitorHandler.removeCallbacks(reassertIfLeftRunnable);
+            ensurePayButtonClickable();
+            return;
+        }
+        // Focus loss from AlertDialog / keyboard / STK must not restart this activity.
         if (DeviceControls.isStkPromptExempt(this)) return;
-        if (DeviceControls.mustStayOnPaymentScreen(this)) {
-            monitorHandler.postDelayed(() -> DeviceControls.openPaymentScreenNow(MainActivity.this), 100L);
-            monitorHandler.postDelayed(() -> DeviceControls.openPaymentScreenNow(MainActivity.this), 400L);
+        if (paymentLockActive()) {
+            scheduleReturnIfLeft(700L);
+        }
+    }
+
+    /** True while any financed balance remains — screen cannot be left until paid. */
+    private boolean paymentLockActive() {
+        Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
+        return DeviceControls.mustStayOnPaymentScreen(policy);
+    }
+
+    /**
+     * Pin lock-task / payment restrictions once while unpaid.
+     * Avoid re-calling startLockTask on every focus tick — that blocks Pay button clicks.
+     */
+    private void pinPaymentScreenOnce() {
+        if (!paymentLockActive()) {
+            lockTaskPinned = false;
+            return;
+        }
+        if (DeviceControls.isStkPromptExempt(this)) return;
+        Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
+        if (policy == null) return;
+        if (!lockTaskPinned) {
+            DeviceControls.applyPolicy(this, policy);
+            lockTaskPinned = true;
+        }
+    }
+
+    private void scheduleReturnIfLeft(long delayMs) {
+        if (!paymentLockActive()) return;
+        if (DeviceControls.isStkPromptExempt(this)) return;
+        monitorHandler.removeCallbacks(reassertIfLeftRunnable);
+        monitorHandler.postDelayed(reassertIfLeftRunnable, delayMs);
+    }
+
+    /** Keep the green Pay button tappable whenever an amount is due. */
+    private void ensurePayButtonClickable() {
+        if (paymentButton == null) return;
+        paymentButton.bringToFront();
+        paymentButton.setClickable(true);
+        paymentButton.setFocusable(true);
+        if (!paymentPending) {
+            int amount = suggestedStkAmount(latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this));
+            if (amount > 0) {
+                paymentButton.setEnabled(true);
+                paymentButton.setTextColor(WHITE);
+                paymentButton.setBackground(panelBg(GREEN, GREEN_DARK, 0, 6));
+            }
         }
     }
 
@@ -152,7 +268,7 @@ public class MainActivity extends Activity {
         Policy policy = KismartApi.lastPolicy(this);
         if (!DeviceControls.isFullLockPolicy(policy)) return false;
         DeviceControls.enforceFullLock(this);
-        finish();
+        forceFinish();
         return true;
     }
 
@@ -160,6 +276,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         monitorHandler.removeCallbacks(monitorRunnable);
         monitorHandler.removeCallbacks(paymentPollRunnable);
+        monitorHandler.removeCallbacks(reassertIfLeftRunnable);
         executor.shutdownNow();
         super.onDestroy();
     }
@@ -190,16 +307,24 @@ public class MainActivity extends Activity {
         header.setGravity(Gravity.CENTER_VERTICAL);
         header.setPadding(0, dp(2), 0, dp(18));
 
-        TextView mark = label("KES", 13, WHITE, true);
-        mark.setGravity(Gravity.CENTER);
-        mark.setBackground(panelBg(GREEN, GREEN, 0, 8));
-        mark.setOnLongClickListener(view -> {
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.logo);
+        logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        logo.setBackground(panelBg(SOFT, LINE, 1, 8));
+        logo.setContentDescription("KISMART");
+        // Hidden admin path only when account is paid. While unpaid, only Pay via M-Pesa is allowed.
+        logo.setOnLongClickListener(view -> {
+            if (paymentLockActive()) {
+                setDetail("Payment required. Tap Pay via M-Pesa and complete payment to unlock.");
+                ensurePayButtonClickable();
+                return true;
+            }
             showAdminUnlock();
             return true;
         });
-        LinearLayout.LayoutParams markParams = new LinearLayout.LayoutParams(dp(44), dp(44));
-        markParams.setMargins(0, 0, dp(12), 0);
-        header.addView(mark, markParams);
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(48), dp(48));
+        logoParams.setMargins(0, 0, dp(12), 0);
+        header.addView(logo, logoParams);
 
         LinearLayout copy = new LinearLayout(this);
         copy.setOrientation(LinearLayout.VERTICAL);
@@ -243,13 +368,16 @@ public class MainActivity extends Activity {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(0, dp(4), 0, dp(12));
+        // Allow children (Pay button) to receive taps without parent intercept.
+        panel.setClickable(false);
+        panel.setFocusable(false);
 
         paymentButton = actionButton("Pay Now", true, view -> showStkPrompt());
         paymentButton.setTextSize(18);
+        paymentButton.setClickable(true);
+        paymentButton.setFocusable(true);
+        paymentButton.setEnabled(true);
         panel.addView(paymentButton, blockParams(0, 10, dp(58)));
-
-        // Request Unlock feature removed — users should use payments only
-        // ...existing code...
         return panel;
     }
 
@@ -353,25 +481,36 @@ public class MainActivity extends Activity {
             return;
         }
 
+        // Known phone on file → send STK immediately (only action is the green Pay button).
+        String knownPhone = latestPolicy.customerPhone == null ? "" : latestPolicy.customerPhone.trim();
+        if (!knownPhone.isEmpty()) {
+            submitStk(amount, knownPhone);
+            return;
+        }
+
+        // Phone missing on account: collect it once, then STK. No cancel-to-leave path.
         EditText phoneInput = new EditText(this);
         phoneInput.setInputType(InputType.TYPE_CLASS_PHONE);
         phoneInput.setSingleLine(true);
         phoneInput.setHint("07XXXXXXXX");
-        String knownPhone = latestPolicy.customerPhone == null ? "" : latestPolicy.customerPhone.trim();
-        if (!knownPhone.isEmpty()) {
-            phoneInput.setText(knownPhone);
-        }
 
-        new AlertDialog.Builder(this)
+        AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("Pay " + formatKes(amount) + " via M-Pesa")
-                .setMessage("A real M-Pesa STK prompt will be sent to this phone number. Confirm the number, then enter your M-Pesa PIN when the prompt appears.")
+                .setMessage("Enter the M-Pesa phone number. You must complete payment to leave this screen.")
                 .setView(phoneInput)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Send STK", (dialog, which) -> {
-                    String phone = phoneInput.getText() == null ? "" : phoneInput.getText().toString().trim();
-                    submitStk(amount, phone);
-                })
-                .show();
+                .setCancelable(false)
+                .setPositiveButton("Send STK", null)
+                .create();
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String phone = phoneInput.getText() == null ? "" : phoneInput.getText().toString().trim();
+            if (phone.isEmpty()) {
+                setDetail("Enter a valid M-Pesa phone number.");
+                return;
+            }
+            dialog.dismiss();
+            submitStk(amount, phone);
+        }));
+        dialog.show();
     }
 
     private void submitStk(int amount, String phoneNumber) {
@@ -379,6 +518,7 @@ public class MainActivity extends Activity {
         setDetail("Sending M-Pesa STK prompt...");
         paymentBalanceBefore = latestPolicy == null ? 0 : latestPolicy.balance;
         // ~10s STK PIN window only; then confirm payment (~3s) or restore limit.
+        lockTaskPinned = false;
         DeviceControls.markStkPromptActive(this, 10_000L);
         executor.execute(() -> {
             try {
@@ -399,6 +539,7 @@ public class MainActivity extends Activity {
                 }
                 final Policy policyToApply = returnedPolicy;
                 runOnUiThread(() -> {
+                    lockTaskPinned = false;
                     DeviceControls.markStkPromptActive(this, 10_000L);
                     if (policyToApply != null) {
                         latestPolicy = policyToApply;
@@ -415,7 +556,10 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     paymentPending = false;
                     DeviceControls.clearStkPromptExempt(this);
+                    lockTaskPinned = false;
+                    pinPaymentScreenOnce();
                     updatePaymentButton(latestPolicy);
+                    ensurePayButtonClickable();
                     setDetail("Payment request failed: " + error.getMessage());
                 });
             }
@@ -442,16 +586,28 @@ public class MainActivity extends Activity {
                         paymentPending = false;
                         monitorHandler.removeCallbacks(paymentPollRunnable);
                         DeviceControls.clearStkPromptExempt(this);
-                        setDetail(cleared
-                                ? "Payment confirmed. Full access restored."
-                                : "Payment confirmed. Balance updated to " + formatKes(policy.balance) + ".");
+                        // Apply updated policy: only full clear (balance 0) releases the screen.
+                        lockTaskPinned = false;
+                        DeviceControls.applyPolicy(this, policy);
+                        if (!cleared) lockTaskPinned = true;
+                        updatePaymentButton(policy);
+                        ensurePayButtonClickable();
+                        if (cleared) {
+                            setDetail("Payment confirmed. Full access restored — you may leave this screen.");
+                        } else {
+                            setDetail("Payment received. Remaining balance " + formatKes(policy.balance)
+                                    + ". Stay on this screen and pay the rest to unlock.");
+                        }
                         return;
                     }
                     if (policy.isPendingStkFailed()) {
                         paymentPending = false;
                         monitorHandler.removeCallbacks(paymentPollRunnable);
                         DeviceControls.clearStkPromptExempt(this);
+                        lockTaskPinned = false;
+                        pinPaymentScreenOnce();
                         updatePaymentButton(policy);
+                        ensurePayButtonClickable();
                         String fail = policy.pendingStkMessage;
                         if (fail == null || fail.trim().isEmpty()) {
                             fail = "M-Pesa did not confirm the payment.";
@@ -461,14 +617,19 @@ public class MainActivity extends Activity {
                     }
                     // STK window ended and still unpaid → force limit + stay on Pay.
                     if (!DeviceControls.isStkPromptExempt(this) && policy.balance > 0) {
+                        lockTaskPinned = false;
                         DeviceControls.resumePaymentLimitAfterStk(this);
+                        lockTaskPinned = true;
                     }
                     // ~10s STK + a few 3s checks (≈ attempts 1@3s, 2@6s, 3@9s, 4@12s, 5@15s).
                     if (paymentPollAttempts >= 5) {
                         paymentPending = false;
                         monitorHandler.removeCallbacks(paymentPollRunnable);
                         DeviceControls.clearStkPromptExempt(this);
+                        lockTaskPinned = false;
+                        pinPaymentScreenOnce();
                         updatePaymentButton(policy);
+                        ensurePayButtonClickable();
                         setDetail("Payment not confirmed. Limit is on. Stay on this screen and tap Pay to try again.");
                         return;
                     }
@@ -483,7 +644,10 @@ public class MainActivity extends Activity {
                     if (paymentPollAttempts >= 5) {
                         paymentPending = false;
                         DeviceControls.clearStkPromptExempt(this);
+                        lockTaskPinned = false;
+                        pinPaymentScreenOnce();
                         updatePaymentButton(latestPolicy);
+                        ensurePayButtonClickable();
                         setDetail("Could not confirm payment. Limit stays on.");
                     } else {
                         schedulePaymentPoll(3000);
@@ -550,12 +714,24 @@ public class MainActivity extends Activity {
         boolean canPay = amount > 0 && !paymentPending;
         if (paymentPending) {
             paymentButton.setText("Waiting for M-Pesa...");
+            paymentButton.setEnabled(false);
+            paymentButton.setClickable(false);
+            paymentButton.setTextColor(MUTED);
+            paymentButton.setBackground(panelBg(SOFT, LINE, 1, 6));
+        } else if (canPay) {
+            paymentButton.setText("Pay " + formatKes(amount) + " via M-Pesa");
+            paymentButton.setEnabled(true);
+            paymentButton.setClickable(true);
+            paymentButton.setFocusable(true);
+            paymentButton.setTextColor(WHITE);
+            paymentButton.setBackground(panelBg(GREEN, GREEN_DARK, 0, 6));
         } else {
-            paymentButton.setText(canPay ? "Pay " + formatKes(amount) + " via M-Pesa" : "No Payment Due");
+            paymentButton.setText("No Payment Due");
+            paymentButton.setEnabled(false);
+            paymentButton.setClickable(false);
+            paymentButton.setTextColor(MUTED);
+            paymentButton.setBackground(panelBg(SOFT, LINE, 1, 6));
         }
-        paymentButton.setEnabled(canPay);
-        paymentButton.setTextColor(canPay ? WHITE : MUTED);
-        paymentButton.setBackground(panelBg(canPay ? GREEN : SOFT, canPay ? GREEN_DARK : LINE, canPay ? 0 : 1, 6));
     }
 
     private void setDetail(String value) {

@@ -13,6 +13,7 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -86,6 +87,15 @@ public class ProtectionGuardActivity extends Activity {
         root.setBackgroundColor(BLACK);
         root.setClickable(true);
         root.setFocusable(true);
+
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.logo);
+        logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        logo.setContentDescription("KISMART");
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(72), dp(72));
+        logoParams.gravity = Gravity.CENTER_HORIZONTAL;
+        logoParams.bottomMargin = dp(18);
+        root.addView(logo, logoParams);
 
         TextView title = new TextView(this);
         title.setText("DEVICE SERVICE REQUIRED");
