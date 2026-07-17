@@ -158,6 +158,8 @@ final class DeviceControls {
         if (isPaymentLimitActive(policy)) {
             if (enforceMissingLimitGuard(activity, policy)) return;
             enterPaymentOnlyMode(activity, policy);
+            // Surface KISMART pay UI immediately so the user is not left in another app.
+            bringLimitSurfaceToFront(activity);
             return;
         }
         if (isFullLockPolicy(policy)) {
@@ -180,10 +182,35 @@ final class DeviceControls {
         if (isPaymentLimitActive(policy)) {
             if (enforceMissingLimitGuard(context, policy)) return;
             applyPaymentOnlyRestrictions(context, policy);
+            // Kick the accessibility guard + pay screen immediately (do not wait for next app switch).
+            bringLimitSurfaceToFront(context);
             return;
         }
         if (isFullLockPolicy(policy)) {
             enforceFullLock(context);
+        }
+    }
+
+    private static long lastLimitBringFrontAt;
+
+    /**
+     * Force the limit experience into the foreground as soon as policy becomes Limited access.
+     * The accessibility overlay still covers other apps; this reduces the multi-second gap.
+     */
+    static void bringLimitSurfaceToFront(Context context) {
+        if (!isPaymentLimitActive(KismartApi.lastPolicy(context))) return;
+        long now = System.currentTimeMillis();
+        // Avoid yanking the user every sync tick while limit stays on.
+        if (now - lastLimitBringFrontAt < 8000L) return;
+        lastLimitBringFrontAt = now;
+        try {
+            Intent intent = new Intent(context, MainActivity.class);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+            context.startActivity(intent);
+        } catch (Exception ignored) {
         }
     }
 

@@ -20,7 +20,8 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 public class KismartAccessibilityService extends AccessibilityService {
-    private static final long WATCHDOG_INTERVAL_MS = 600L;
+    private static final long WATCHDOG_INTERVAL_MS = 200L;
+    private static final long WATCHDOG_LIMIT_INTERVAL_MS = 120L;
     private static final long EMERGENCY_ALLOW_MS = 30000L;
     private static final long KISMART_OPEN_ALLOW_MS = 5000L;
 
@@ -29,7 +30,11 @@ public class KismartAccessibilityService extends AccessibilityService {
         @Override
         public void run() {
             checkBlockerState();
-            handler.postDelayed(this, WATCHDOG_INTERVAL_MS);
+            long delay = DeviceControls.isPaymentLimitActive(KismartApi.lastPolicy(KismartAccessibilityService.this))
+                    || DeviceControls.isFullLockPolicy(KismartApi.lastPolicy(KismartAccessibilityService.this))
+                    ? WATCHDOG_LIMIT_INTERVAL_MS
+                    : WATCHDOG_INTERVAL_MS;
+            handler.postDelayed(this, delay);
         }
     };
 
@@ -39,14 +44,11 @@ public class KismartAccessibilityService extends AccessibilityService {
     private boolean fullLockBlockerVisible;
     private long emergencyAllowedUntil;
     private long allowKismartOpenUntil;
-    /** Debounce limit overlay so stale/offline policy flips do not flash the screen. */
-    private int limitShowStableCount;
-    private int limitHideStableCount;
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
-        // React to all events to catch any window change or click
+        // Apply immediately on every window/app change — no waiting for the next poll.
         checkBlockerState();
     }
 
@@ -60,6 +62,8 @@ public class KismartAccessibilityService extends AccessibilityService {
         DeviceControls.protectAppFromUninstall(this);
         configureService();
         handler.removeCallbacks(watchdog);
+        // Paint limit screen immediately if last known policy is already limited.
+        checkBlockerState();
         handler.post(watchdog);
     }
 
@@ -87,57 +91,43 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     // ========== Main decision logic ==========
     private void checkBlockerState() {
+        Policy policy = KismartApi.lastPolicy(this);
         String packageName = activePackageName();
-        if (packageName.isEmpty()) {
-            hideBlockerNow();
-            return;
-        }
 
-        // Never block KISMART itself
-        if (getPackageName().equals(packageName)) {
+        // Never block KISMART itself (payment / account UI).
+        if (!packageName.isEmpty() && getPackageName().equals(packageName)) {
             hideBlockerNow();
             return;
         }
 
         // Always protect KISMART's app-info/removal screens, even before policy sync.
-        if (isDangerousScreenNow(packageName)) {
+        if (!packageName.isEmpty() && isDangerousScreenNow(packageName)) {
             showBlockerNow();
             return;
         }
 
-        Policy policy = KismartApi.lastPolicy(this);
         if (policy == null) {
-            clearLimitDebounce();
             hideBlockerNow();
             return;
         }
 
         // Full lock only while balance remains.
         if (DeviceControls.isFullLockPolicy(policy)) {
-            clearLimitDebounce();
             showFullLockBlockerNow();
             DeviceControls.enforceFullLock(this);
             return;
         }
 
-        // Limit screen only when backend policy says limit is active AND balance > 0.
+        // Limit screen: show IMMEDIATELY for any non-allowed surface while unpaid.
+        // Includes launcher/home so other apps never get a multi-second window.
         if (DeviceControls.isPaymentLimitActive(policy)) {
-            if (isCameraScreen(packageName)) {
-                stableShowLimitBlocker();
+            if (isLimitExemptPackage(packageName)) {
+                hideBlockerNow();
                 return;
             }
-            if (isLauncherPackage(packageName) || isAllowedSystemPackage(packageName)) {
-                stableHideLimitBlocker();
-            } else if (System.currentTimeMillis() < allowKismartOpenUntil
-                    && isOverlayEventPackage(packageName)) {
-                stableHideLimitBlocker();
-            } else {
-                stableShowLimitBlocker();
-            }
+            showBlockerNow();
             return;
         }
-
-        clearLimitDebounce();
 
         // No payable limit → hide limit overlay; keep protection only on dangerous screens.
         if (!DeviceControls.isFinancedPolicy(policy)) {
@@ -145,39 +135,34 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        if (isLauncherPackage(packageName)) {
+        if (packageName.isEmpty() || isLauncherPackage(packageName)) {
             hideBlockerNow();
             return;
         }
 
-        boolean dangerous = isDangerousScreenNow(packageName);
-        if (dangerous) {
+        if (isDangerousScreenNow(packageName)) {
             showBlockerNow();
         } else {
             hideBlockerNow();
         }
     }
 
-    private void stableShowLimitBlocker() {
-        limitHideStableCount = 0;
-        limitShowStableCount += 1;
-        // Require two consecutive samples (~1.2s) before showing, unless already visible.
-        if (blockerVisible || limitShowStableCount >= 2) {
-            showBlockerNow();
+    /**
+     * Packages allowed without the payment limit overlay while Limited access is active.
+     * Launcher is NOT exempt — otherwise users can open other apps for several seconds.
+     */
+    private boolean isLimitExemptPackage(String packageName) {
+        if (packageName == null || packageName.isEmpty()) return false;
+        if (getPackageName().equals(packageName)) return true;
+        if (System.currentTimeMillis() < allowKismartOpenUntil && isOverlayEventPackage(packageName)) {
+            return true;
         }
-    }
-
-    private void stableHideLimitBlocker() {
-        limitShowStableCount = 0;
-        limitHideStableCount += 1;
-        if (!blockerVisible || limitHideStableCount >= 2) {
-            hideBlockerNow();
+        // System chrome only (status bar / android root), not launchers or third-party apps.
+        if ("android".equals(packageName) || "com.android.systemui".equals(packageName)) {
+            return true;
         }
-    }
-
-    private void clearLimitDebounce() {
-        limitShowStableCount = 0;
-        limitHideStableCount = 0;
+        // Emergency dialer only during the emergency allow window.
+        return System.currentTimeMillis() < emergencyAllowedUntil && isEmergencyPackage(packageName);
     }
 
     /** Checks both package type and actual on‑screen content */
@@ -333,7 +318,7 @@ public class KismartAccessibilityService extends AccessibilityService {
                 || "com.android.systemui".equals(value);
     }
 
-    // ========== Blocker show / hide (simple, no debounce) ==========
+    // ========== Blocker show / hide (immediate, input-capturing) ==========
     private void showBlockerNow() {
         if (blockerVisible && !fullLockBlockerVisible) return;
         showBlocker(buildBlocker(), false);
@@ -352,13 +337,13 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         try {
             blocker = nextBlocker;
+            // Capture touches immediately — do NOT use FLAG_NOT_FOCUSABLE (lets apps stay usable under the overlay).
             int flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                    | WindowManager.LayoutParams.FLAG_SECURE;
-            if (fullLockBlocker) {
-                flags |= WindowManager.LayoutParams.FLAG_FULLSCREEN;
-            } else {
-                flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
-            }
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                    | WindowManager.LayoutParams.FLAG_SECURE
+                    | WindowManager.LayoutParams.FLAG_FULLSCREEN
+                    | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                    | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.MATCH_PARENT,
@@ -366,9 +351,14 @@ public class KismartAccessibilityService extends AccessibilityService {
                     flags,
                     PixelFormat.TRANSLUCENT);
             params.gravity = Gravity.TOP | Gravity.START;
+            params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN;
             windowManager.addView(blocker, params);
             blockerVisible = true;
             fullLockBlockerVisible = fullLockBlocker;
+            try {
+                blocker.requestFocus();
+            } catch (Exception ignored) {
+            }
         } catch (Exception e) {
             blockerVisible = false;
             fullLockBlockerVisible = false;

@@ -38,6 +38,7 @@ public class AgentSyncService extends Service {
     private static final int RESTART_REQUEST_ID = 2602;
     private static final int PROTECTION_NOTIFICATION_ID = 2603;
     private static final long SYNC_INTERVAL_MS = 5000L;
+    private static final long SYNC_INTERVAL_LIMIT_MS = 2000L;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -51,8 +52,14 @@ public class AgentSyncService extends Service {
     private final Runnable syncRunnable = new Runnable() {
         @Override
         public void run() {
+            // Re-apply last known limit immediately (offline-safe) before waiting on network sync.
+            enforceLastKnownPolicy();
             syncOnce();
-            handler.postDelayed(this, SYNC_INTERVAL_MS);
+            long delay = DeviceControls.isPaymentLimitActive(KismartApi.lastPolicy(AgentSyncService.this))
+                    || DeviceControls.isFullLockPolicy(KismartApi.lastPolicy(AgentSyncService.this))
+                    ? SYNC_INTERVAL_LIMIT_MS
+                    : SYNC_INTERVAL_MS;
+            handler.postDelayed(this, delay);
         }
     };
 
