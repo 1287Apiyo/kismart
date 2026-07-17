@@ -39,6 +39,9 @@ public class KismartAccessibilityService extends AccessibilityService {
     private boolean fullLockBlockerVisible;
     private long emergencyAllowedUntil;
     private long allowKismartOpenUntil;
+    /** Debounce limit overlay so stale/offline policy flips do not flash the screen. */
+    private int limitShowStableCount;
+    private int limitHideStableCount;
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
@@ -104,49 +107,44 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         Policy policy = KismartApi.lastPolicy(this);
         if (policy == null) {
+            clearLimitDebounce();
             hideBlockerNow();
             return;
         }
 
-        // Full lock is handled by other components – hide our overlay
+        // Full lock only while balance remains.
         if (DeviceControls.isFullLockPolicy(policy)) {
+            clearLimitDebounce();
             showFullLockBlockerNow();
             DeviceControls.enforceFullLock(this);
             return;
         }
 
-        // No restriction active → hide
-        if (!DeviceControls.isFinancedPolicy(policy) && !policy.paymentOnlyActive) {
+        // Limit screen only when backend policy says limit is active AND balance > 0.
+        if (DeviceControls.isPaymentLimitActive(policy)) {
+            if (isCameraScreen(packageName)) {
+                stableShowLimitBlocker();
+                return;
+            }
+            if (isLauncherPackage(packageName) || isAllowedSystemPackage(packageName)) {
+                stableHideLimitBlocker();
+            } else if (System.currentTimeMillis() < allowKismartOpenUntil
+                    && isOverlayEventPackage(packageName)) {
+                stableHideLimitBlocker();
+            } else {
+                stableShowLimitBlocker();
+            }
+            return;
+        }
+
+        clearLimitDebounce();
+
+        // No payable limit → hide limit overlay; keep protection only on dangerous screens.
+        if (!DeviceControls.isFinancedPolicy(policy)) {
             hideBlockerNow();
             return;
         }
 
-        // ======= LIMITED MODE (paymentOnlyActive) =======
-        // This logic is taken directly from your old working code,
-        // only the show/hide methods are now the stable "Now" versions.
-        if (policy.paymentOnlyActive) {
-            if (isCameraScreen(packageName)) {
-                showBlockerNow();
-                return;
-            }
-            // Allow launcher, system packages, and emergency dialer
-            if (isLauncherPackage(packageName) || isAllowedSystemPackage(packageName)) {
-                hideBlockerNow();
-            }
-            // Allow a brief window to open KISMART when "Open KISMART" button is pressed
-            else if (System.currentTimeMillis() < allowKismartOpenUntil
-                    && isOverlayEventPackage(packageName)) {
-                hideBlockerNow();
-            }
-            // Everything else – show the protection overlay
-            else {
-                showBlockerNow();
-            }
-            return;
-        }
-
-        // ======= FINANCED MODE (not limited) =======
-        // Show blocker ONLY on dangerous screens, hide everywhere else
         if (isLauncherPackage(packageName)) {
             hideBlockerNow();
             return;
@@ -158,6 +156,28 @@ public class KismartAccessibilityService extends AccessibilityService {
         } else {
             hideBlockerNow();
         }
+    }
+
+    private void stableShowLimitBlocker() {
+        limitHideStableCount = 0;
+        limitShowStableCount += 1;
+        // Require two consecutive samples (~1.2s) before showing, unless already visible.
+        if (blockerVisible || limitShowStableCount >= 2) {
+            showBlockerNow();
+        }
+    }
+
+    private void stableHideLimitBlocker() {
+        limitShowStableCount = 0;
+        limitHideStableCount += 1;
+        if (!blockerVisible || limitHideStableCount >= 2) {
+            hideBlockerNow();
+        }
+    }
+
+    private void clearLimitDebounce() {
+        limitShowStableCount = 0;
+        limitHideStableCount = 0;
     }
 
     /** Checks both package type and actual on‑screen content */

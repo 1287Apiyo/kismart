@@ -357,7 +357,7 @@ public class MainActivity extends Activity {
 
     private String accountState(Policy policy) {
         if (DeviceControls.isFullLockPolicy(policy)) return "Locked";
-        if (policy.paymentOnlyActive) return "Restricted";
+        if (DeviceControls.isPaymentLimitActive(policy)) return "Restricted";
         if (policy.balance <= 0) return "Paid";
         return "Active";
     }

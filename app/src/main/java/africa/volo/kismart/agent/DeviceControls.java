@@ -74,8 +74,12 @@ final class DeviceControls {
                 || normalized.contains(legacyForm);
     }
 
+    static boolean isPaymentLimitActive(Policy policy) {
+        return policy != null && policy.shouldShowLimitScreen();
+    }
+
     static boolean isLimitGuardReady(Context context, Policy policy) {
-        if (policy == null || !policy.paymentOnlyActive) return true;
+        if (!isPaymentLimitActive(policy)) return true;
         return isProtectionGuardReady(context);
     }
 
@@ -93,6 +97,7 @@ final class DeviceControls {
 
     static boolean isFullLockPolicy(Policy policy) {
         return policy != null
+                && policy.balance > 0
                 && policy.restrictionActive
                 && "Full lock".equals(policy.restrictionLevel);
     }
@@ -140,7 +145,8 @@ final class DeviceControls {
         if (policy == null) return;
         hideLauncherEntry(activity);
         enforceFinancedDeviceHardening(activity);
-        if (!policy.restrictionActive || "None".equals(policy.restrictionLevel)) {
+        // Paid in full (no balance) always clears limit/lock surfaces.
+        if (policy.balance <= 0 || !policy.restrictionActive || "None".equals(policy.restrictionLevel)) {
             restoreOwnerRestrictions(activity);
             DeviceControls.exitLockTask(activity);
             return;
@@ -149,7 +155,7 @@ final class DeviceControls {
             setOwnerLockMessage(activity, policy.customerMessage);
             return;
         }
-        if ("Limited access".equals(policy.restrictionLevel)) {
+        if (isPaymentLimitActive(policy)) {
             if (enforceMissingLimitGuard(activity, policy)) return;
             enterPaymentOnlyMode(activity, policy);
             return;
@@ -163,7 +169,7 @@ final class DeviceControls {
         if (policy == null) return;
         hideLauncherEntry(context);
         enforceFinancedDeviceHardening(context);
-        if (!policy.restrictionActive || "None".equals(policy.restrictionLevel)) {
+        if (policy.balance <= 0 || !policy.restrictionActive || "None".equals(policy.restrictionLevel)) {
             restoreOwnerRestrictions(context);
             return;
         }
@@ -171,7 +177,7 @@ final class DeviceControls {
             setOwnerLockMessage(context, policy.customerMessage);
             return;
         }
-        if ("Limited access".equals(policy.restrictionLevel)) {
+        if (isPaymentLimitActive(policy)) {
             if (enforceMissingLimitGuard(context, policy)) return;
             applyPaymentOnlyRestrictions(context, policy);
             return;
@@ -182,6 +188,11 @@ final class DeviceControls {
     }
 
     static void enforceFullLock(Context context) {
+        Policy policy = KismartApi.lastPolicy(context);
+        if (policy != null && policy.balance <= 0) {
+            restoreOwnerRestrictions(context);
+            return;
+        }
         applyStrictOwnerRestrictions(context);
         setOwnerLockMessage(context, FULL_LOCK_MESSAGE);
         if (context instanceof Activity) {

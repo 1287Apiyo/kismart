@@ -64,11 +64,32 @@ final class Policy {
         JSONObject identity = object.optJSONObject("identity");
         JSONObject paymentOnly = object.optJSONObject("paymentOnly");
         JSONArray commands = object.optJSONArray("pendingCommands");
+        int balance = object.optInt("balance", 0);
+        if (paymentOnly != null && paymentOnly.has("balance")) {
+            balance = paymentOnly.optInt("balance", balance);
+        }
+        int arrears = object.optInt("arrears", 0);
+        if (paymentOnly != null && paymentOnly.has("arrears")) {
+            arrears = paymentOnly.optInt("arrears", arrears);
+        }
         boolean restrictionActive = restriction != null && restriction.optBoolean("active", false);
         String restrictionLevel = restriction == null ? "None" : restriction.optString("level", "None");
+
+        // Limit screen is only valid while there is still a financed balance to pay.
         boolean paymentOnlyActive = paymentOnly != null
                 ? paymentOnly.optBoolean("active", false)
                 : restrictionActive && "Limited access".equals(restrictionLevel);
+        if (balance <= 0) {
+            paymentOnlyActive = false;
+            if ("Limited access".equals(restrictionLevel) || "Full lock".equals(restrictionLevel)) {
+                restrictionActive = false;
+                restrictionLevel = "None";
+            }
+        } else if (paymentOnlyActive) {
+            restrictionActive = true;
+            restrictionLevel = "Limited access";
+        }
+
         return new Policy(
                 object.optString("contractId"),
                 object.optString("customer"),
@@ -77,8 +98,8 @@ final class Policy {
                 restrictionLevel,
                 restrictionActive,
                 object.optString("customerMessage", "Account policy synced."),
-                object.optInt("balance", 0),
-                object.optInt("arrears", 0),
+                balance,
+                arrears,
                 object.optString("nextDue", ""),
                 commands == null ? 0 : commands.length(),
                 identity != null && identity.optBoolean("bound", false),
@@ -86,6 +107,11 @@ final class Policy {
                 paymentOnlyActive,
                 parseAllowedPackages(object.optJSONArray("allowedPaymentPackages"), paymentOnly == null ? null : paymentOnly.optJSONArray("allowedPackages"))
         );
+    }
+
+    /** True only when the server says limit is on and a payable balance remains. */
+    boolean shouldShowLimitScreen() {
+        return paymentOnlyActive && balance > 0;
     }
 
     private static String[] parseAllowedPackages(JSONArray... arrays) {

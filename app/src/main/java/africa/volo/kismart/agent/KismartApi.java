@@ -29,7 +29,7 @@ final class KismartApi {
     static final String KEY_INSTALL_ID = "install_id";
     static final String KEY_BINDING_TOKEN = "binding_token";
     private static final String KEY_APPLIED_COMMAND_IDS = "applied_command_ids";
-    static final String APP_VERSION = "android-1.0.43";
+    static final String APP_VERSION = "android-1.0.44";
     /**
      * Public HTTPS control plane. Phones must use this (or another public host) so lock/restore
      * works from mobile data and any Wi-Fi, not only the shop LAN.
