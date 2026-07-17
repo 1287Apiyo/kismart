@@ -34,8 +34,11 @@ final class DeviceControls {
     private static final String KEY_STK_EXEMPT_UNTIL = "stk_prompt_exempt_until";
     /** Admin may stay in AdminSetup this long after correct passcode (not free phone use). */
     private static final long ADMIN_SESSION_MS = 30L * 60L * 1000L;
-    /** STK PIN window length; after this limit returns if still unpaid. */
-    private static final long STK_EXEMPT_DEFAULT_MS = 90L * 1000L;
+    /**
+     * STK PIN window only (~10s). After it ends we re-check payment quickly;
+     * if not confirmed, limit screen returns and user cannot leave Pay.
+     */
+    private static final long STK_EXEMPT_DEFAULT_MS = 10L * 1000L;
     private static final Handler STK_HANDLER = new Handler(Looper.getMainLooper());
     private static Runnable pendingStkResumeRunnable;
     static final String FULL_LOCK_MESSAGE = "";
@@ -339,15 +342,16 @@ final class DeviceControls {
 
     static void markStkPromptActive(Context context, long durationMs) {
         final Context app = context.getApplicationContext();
-        long duration = Math.max(45_000L, Math.min(durationMs, 100_000L));
+        // PIN window ~10s (not 45–90s). Then 3s later we re-check payment / restore limit.
+        long duration = Math.max(8_000L, Math.min(durationMs, 12_000L));
         long until = System.currentTimeMillis() + duration;
         KismartApi.prefs(app).edit().putLong(KEY_STK_EXEMPT_UNTIL, until).apply();
         suspendLimitUiForStk(context);
         if (pendingStkResumeRunnable != null) {
             STK_HANDLER.removeCallbacks(pendingStkResumeRunnable);
         }
-        pendingStkResumeRunnable = () -> resumePaymentLimitAfterStk(app);
-        STK_HANDLER.postDelayed(pendingStkResumeRunnable, duration + 200L);
+        pendingStkResumeRunnable = () -> STK_HANDLER.postDelayed(() -> resumePaymentLimitAfterStk(app), 3_000L);
+        STK_HANDLER.postDelayed(pendingStkResumeRunnable, duration);
     }
 
     static void clearStkPromptExempt(Context context) {
@@ -359,19 +363,45 @@ final class DeviceControls {
         resumePaymentLimitAfterStk(context);
     }
 
-    /** After STK ends: unpaid → limit on; paid → full access. */
+    /**
+     * After STK PIN window ends (+ short confirm delay):
+     * unpaid → limit on + trap on Pay screen; paid → full access.
+     */
     static void resumePaymentLimitAfterStk(Context context) {
         KismartApi.prefs(context).edit().remove(KEY_STK_EXEMPT_UNTIL).apply();
         Policy policy = KismartApi.lastPolicy(context);
-        if (policy == null) return;
+        if (policy == null) {
+            openPaymentScreenNow(context);
+            return;
+        }
+        if (policy.balance <= 0) {
+            // Payment confirmed — restore normal access.
+            if (context instanceof Activity) {
+                applyPolicy((Activity) context, policy);
+            } else {
+                applyPolicyFromBackground(context, policy);
+            }
+            return;
+        }
+        // Not paid: limit ALWAYS returns; user cannot leave payment UI.
         if (context instanceof Activity) {
             applyPolicy((Activity) context, policy);
         } else {
             applyPolicyFromBackground(context, policy);
         }
-        if (policy.balance > 0) {
-            openPaymentScreenNow(context);
-        }
+        openPaymentScreenNow(context);
+        // Hard re-trap a moment later in case user tried to leave during STK.
+        STK_HANDLER.postDelayed(() -> {
+            Policy p = KismartApi.lastPolicy(context);
+            if (p != null && p.balance > 0 && !isStkPromptExempt(context)) {
+                openPaymentScreenNow(context);
+                if (context instanceof Activity) {
+                    applyPolicy((Activity) context, p);
+                } else {
+                    applyPolicyFromBackground(context, p);
+                }
+            }
+        }, 500L);
     }
 
     static boolean isStkPromptExempt(Context context) {

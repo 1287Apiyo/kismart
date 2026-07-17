@@ -58,12 +58,13 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(MainActivity.this);
-            // While unpaid (and not admin), re-pin payment UI every cycle.
-            if (DeviceControls.mustStayOnPaymentScreen(MainActivity.this)) {
+            // Unpaid: stay locked on payment UI (except brief STK PIN window).
+            if (DeviceControls.mustStayOnPaymentScreen(MainActivity.this)
+                    && !DeviceControls.isStkPromptExempt(MainActivity.this)) {
                 DeviceControls.applyPolicy(MainActivity.this, policy);
             }
             autoSync();
-            long delay = DeviceControls.mustStayOnPaymentScreen(MainActivity.this) ? 2000L : 5000L;
+            long delay = DeviceControls.mustStayOnPaymentScreen(MainActivity.this) ? 1000L : 5000L;
             monitorHandler.postDelayed(this, delay);
         }
     };
@@ -106,11 +107,13 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        // Unpaid debt: trap on payment screen — back must not leave KISMART (unless admin session).
+        // Unpaid: never leave payment screen (STK PIN is handled by system dialog on top).
         Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
         if (DeviceControls.mustStayOnPaymentScreen(this)) {
-            DeviceControls.applyPolicy(this, policy);
-            setDetail("Payment required. Pay via M-Pesa to unlock this phone.");
+            if (!DeviceControls.isStkPromptExempt(this)) {
+                DeviceControls.applyPolicy(this, policy);
+            }
+            setDetail("Payment required. Complete M-Pesa payment to unlock this phone.");
             return;
         }
         super.onBackPressed();
@@ -119,11 +122,12 @@ public class MainActivity extends Activity {
     @Override
     protected void onUserLeaveHint() {
         super.onUserLeaveHint();
-        // If the user tries Home/Recents while debt remains, pull them back to Pay.
+        // Unpaid: pull back to Pay immediately (allow STK PIN window only).
         Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
-        if (DeviceControls.mustStayOnPaymentScreen(this)) {
-            monitorHandler.postDelayed(() -> DeviceControls.forcePaymentScreen(MainActivity.this), 250L);
-            monitorHandler.postDelayed(() -> DeviceControls.applyPolicy(MainActivity.this, policy), 400L);
+        if (DeviceControls.mustStayOnPaymentScreen(this) && !DeviceControls.isStkPromptExempt(this)) {
+            monitorHandler.postDelayed(() -> DeviceControls.openPaymentScreenNow(MainActivity.this), 100L);
+            monitorHandler.postDelayed(() -> DeviceControls.applyPolicy(MainActivity.this, policy), 200L);
+            monitorHandler.postDelayed(() -> DeviceControls.openPaymentScreenNow(MainActivity.this), 500L);
         }
     }
 
@@ -131,8 +135,10 @@ public class MainActivity extends Activity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) return;
+        if (DeviceControls.isStkPromptExempt(this)) return;
         if (DeviceControls.mustStayOnPaymentScreen(this)) {
-            monitorHandler.postDelayed(() -> DeviceControls.forcePaymentScreen(MainActivity.this), 200L);
+            monitorHandler.postDelayed(() -> DeviceControls.openPaymentScreenNow(MainActivity.this), 100L);
+            monitorHandler.postDelayed(() -> DeviceControls.openPaymentScreenNow(MainActivity.this), 400L);
         }
     }
 
@@ -372,8 +378,8 @@ public class MainActivity extends Activity {
         if (paymentButton != null) paymentButton.setEnabled(false);
         setDetail("Sending M-Pesa STK prompt...");
         paymentBalanceBefore = latestPolicy == null ? 0 : latestPolicy.balance;
-        // Suspend limit UI only while STK PIN is expected (not permanent unlock).
-        DeviceControls.markStkPromptActive(this, 90_000L);
+        // ~10s STK PIN window only; then confirm payment (~3s) or restore limit.
+        DeviceControls.markStkPromptActive(this, 10_000L);
         executor.execute(() -> {
             try {
                 JSONObject result = KismartApi.submitPaybillStk(this, amount, phoneNumber);
@@ -393,7 +399,7 @@ public class MainActivity extends Activity {
                 }
                 final Policy policyToApply = returnedPolicy;
                 runOnUiThread(() -> {
-                    DeviceControls.markStkPromptActive(this, 90_000L);
+                    DeviceControls.markStkPromptActive(this, 10_000L);
                     if (policyToApply != null) {
                         latestPolicy = policyToApply;
                         renderPolicy(policyToApply);
@@ -402,7 +408,8 @@ public class MainActivity extends Activity {
                     paymentPollAttempts = 0;
                     updatePaymentButton(latestPolicy);
                     setDetail(message + (sentTo == null || sentTo.isEmpty() ? "" : " (" + sentTo + ")"));
-                    schedulePaymentPoll(5000);
+                    // First confirm check ~3s after STK is sent (catches fast PIN entry).
+                    schedulePaymentPoll(3000);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
@@ -423,7 +430,7 @@ public class MainActivity extends Activity {
     private void pollPaymentStatus() {
         if (!paymentPending) return;
         paymentPollAttempts += 1;
-        setDetail("Waiting for M-Pesa PIN / confirmation... (" + paymentPollAttempts + ")");
+        setDetail("Checking M-Pesa confirmation... (" + paymentPollAttempts + ")");
         executor.execute(() -> {
             try {
                 Policy policy = KismartApi.sync(this);
@@ -452,32 +459,34 @@ public class MainActivity extends Activity {
                         setDetail("Payment not confirmed: " + fail + " Limit is on.");
                         return;
                     }
-                    // Do not re-apply limit while STK PIN window is open (avoids flicker).
+                    // STK window ended and still unpaid → force limit + stay on Pay.
                     if (!DeviceControls.isStkPromptExempt(this) && policy.balance > 0) {
-                        DeviceControls.applyPolicy(this, policy);
+                        DeviceControls.resumePaymentLimitAfterStk(this);
                     }
-                    if (paymentPollAttempts >= 18) {
+                    // ~10s STK + a few 3s checks (≈ attempts 1@3s, 2@6s, 3@9s, 4@12s, 5@15s).
+                    if (paymentPollAttempts >= 5) {
                         paymentPending = false;
+                        monitorHandler.removeCallbacks(paymentPollRunnable);
                         DeviceControls.clearStkPromptExempt(this);
                         updatePaymentButton(policy);
-                        setDetail("Payment not confirmed yet. Limit stays on. Tap Pay to try again.");
+                        setDetail("Payment not confirmed. Limit is on. Stay on this screen and tap Pay to try again.");
                         return;
                     }
-                    schedulePaymentPoll(5000);
+                    schedulePaymentPoll(3000);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
-                    if (DeviceControls.isStkPromptExempt(this) && paymentPollAttempts < 18) {
-                        schedulePaymentPoll(5000);
+                    if (DeviceControls.isStkPromptExempt(this) && paymentPollAttempts < 5) {
+                        schedulePaymentPoll(3000);
                         return;
                     }
-                    if (paymentPollAttempts >= 18) {
+                    if (paymentPollAttempts >= 5) {
                         paymentPending = false;
                         DeviceControls.clearStkPromptExempt(this);
                         updatePaymentButton(latestPolicy);
                         setDetail("Could not confirm payment. Limit stays on.");
                     } else {
-                        schedulePaymentPoll(5000);
+                        schedulePaymentPoll(3000);
                     }
                 });
             }
