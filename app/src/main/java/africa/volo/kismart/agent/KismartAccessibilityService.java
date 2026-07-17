@@ -19,6 +19,15 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+/**
+ * Shows the limit / protection overlay immediately on restricted surfaces only:
+ * - KISMART / Device Service app info & uninstall paths
+ * - Factory reset (including Settings search results)
+ * - Accessibility control screens
+ * - Device admin deactivation screens
+ *
+ * Normal Settings (Wi‑Fi, display, etc.) stay usable.
+ */
 public class KismartAccessibilityService extends AccessibilityService {
     private static final long WATCHDOG_INTERVAL_MS = 200L;
     private static final long WATCHDOG_LIMIT_INTERVAL_MS = 120L;
@@ -48,17 +57,11 @@ public class KismartAccessibilityService extends AccessibilityService {
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
-        // Block Settings / app-info paths on the earliest event type (before the user can navigate).
-        CharSequence eventPackage = event.getPackageName();
-        if (eventPackage != null && isDeviceProtectionActive()) {
-            String pkg = eventPackage.toString();
-            if (isSettingsOrAppManagementPackage(pkg) && !getPackageName().equals(pkg)) {
-                showBlockerNow();
-                kickOutOfRestrictedSurface();
-                return;
-            }
+        // Fast path: react on the event package/text before a full tree walk.
+        if (isRestrictedEvent(event)) {
+            showBlockerNow();
+            return;
         }
-        // Apply immediately on every window/app change — no waiting for the next poll.
         checkBlockerState();
     }
 
@@ -72,7 +75,6 @@ public class KismartAccessibilityService extends AccessibilityService {
         DeviceControls.protectAppFromUninstall(this);
         configureService();
         handler.removeCallbacks(watchdog);
-        // Paint limit screen immediately if last known policy is already limited.
         checkBlockerState();
         handler.post(watchdog);
     }
@@ -103,9 +105,6 @@ public class KismartAccessibilityService extends AccessibilityService {
     private void checkBlockerState() {
         Policy policy = KismartApi.lastPolicy(this);
         String packageName = activePackageName();
-        if (packageName.isEmpty()) {
-            packageName = topWindowPackageName();
-        }
 
         // Never block KISMART itself (payment / account UI).
         if (!packageName.isEmpty() && getPackageName().equals(packageName)) {
@@ -113,18 +112,9 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // ZERO navigation: any Settings / app-info / installer path is blocked immediately
-        // while the device is enrolled or under limit — no time to browse to the APK.
-        if (isDeviceProtectionActive() && isSettingsOrAppManagementPackage(packageName)) {
+        // Named restricted screens only — not all of Settings.
+        if (!packageName.isEmpty() && isDangerousScreenNow(packageName)) {
             showBlockerNow();
-            kickOutOfRestrictedSurface();
-            return;
-        }
-
-        // Content-based removal surfaces (long-press uninstall, Play Store, etc.).
-        if (isDeviceProtectionActive() && isDangerousRemovalSurfaceContent()) {
-            showBlockerNow();
-            kickOutOfRestrictedSurface();
             return;
         }
 
@@ -133,17 +123,29 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Full lock only while balance remains.
         if (DeviceControls.isFullLockPolicy(policy)) {
             showFullLockBlockerNow();
             DeviceControls.enforceFullLock(this);
             return;
         }
 
-        // Limit screen: show IMMEDIATELY for any non-allowed surface while unpaid.
-        // Includes launcher/home so other apps never get a multi-second window.
+        // Limit mode: block other apps immediately; keep launcher / system / normal settings usable
+        // unless the surface is a named restricted screen (handled above).
         if (DeviceControls.isPaymentLimitActive(policy)) {
-            if (isLimitExemptPackage(packageName)) {
+            if (packageName.isEmpty()) {
+                // Keep existing overlay if any; do not flash-hide on empty package samples.
+                return;
+            }
+            if (isLauncherPackage(packageName) || isAllowedSystemPackage(packageName)) {
+                hideBlockerNow();
+                return;
+            }
+            if (isSettingsLikePackage(packageName)) {
+                // Normal Settings home / Wi‑Fi / sound / etc. stay open.
+                hideBlockerNow();
+                return;
+            }
+            if (System.currentTimeMillis() < allowKismartOpenUntil && isOverlayEventPackage(packageName)) {
                 hideBlockerNow();
                 return;
             }
@@ -151,70 +153,105 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // No payable limit → hide limit overlay; keep protection only on dangerous screens.
         if (!DeviceControls.isFinancedPolicy(policy)) {
             hideBlockerNow();
             return;
         }
 
-        if (packageName.isEmpty() || isLauncherPackage(packageName)) {
+        // Financed, not limited: only protect the named dangerous screens (already checked).
+        if (packageName.isEmpty() || isLauncherPackage(packageName) || isSettingsLikePackage(packageName)) {
             hideBlockerNow();
             return;
         }
-
-        if (isDangerousRemovalSurfaceContent()) {
-            showBlockerNow();
-            kickOutOfRestrictedSurface();
-        } else {
-            hideBlockerNow();
-        }
+        hideBlockerNow();
     }
 
     /**
-     * Packages allowed without the payment limit overlay while Limited access is active.
-     * Launcher is NOT exempt — otherwise users can open other apps for several seconds.
-     * Settings is NEVER exempt.
+     * Instant event-level match so restricted screens are blocked without waiting for the watchdog.
      */
-    private boolean isLimitExemptPackage(String packageName) {
-        if (packageName == null || packageName.isEmpty()) return false;
-        if (getPackageName().equals(packageName)) return true;
-        // Never treat Settings / installers as exempt — even under systemui-driven flows.
-        if (isSettingsOrAppManagementPackage(packageName)) return false;
-        if (System.currentTimeMillis() < allowKismartOpenUntil && isOverlayEventPackage(packageName)) {
+    private boolean isRestrictedEvent(AccessibilityEvent event) {
+        CharSequence packageCs = event.getPackageName();
+        String packageName = packageCs == null ? "" : packageCs.toString().trim();
+        if (!packageName.isEmpty() && getPackageName().equals(packageName)) return false;
+
+        // Uninstall / package installer UI for any package is always high risk while enrolled.
+        if (isPackageInstallerPackage(packageName)) {
+            String eventText = eventText(event);
+            if (mentionsProtectedApp(eventText) || mentionsProtectedApp(collectQuickScreenText())) {
+                return true;
+            }
+            // Installer confirmation dialogs still need a look at on-screen text.
+            return isDangerousScreenNow(packageName);
+        }
+
+        String eventText = eventText(event);
+        if (!eventText.isEmpty() && isRestrictedContent(eventText)) {
             return true;
         }
-        // System chrome only (status bar / android root), not launchers or third-party apps.
-        if ("android".equals(packageName) || "com.android.systemui".equals(packageName)) {
-            return true;
+
+        if (!packageName.isEmpty() && (isSettingsLikePackage(packageName) || isPackageInstallerPackage(packageName))) {
+            return isDangerousScreenNow(packageName);
         }
-        // Emergency dialer only during the emergency allow window.
-        return System.currentTimeMillis() < emergencyAllowedUntil && isEmergencyPackage(packageName);
+        return false;
     }
 
-    private boolean isDeviceProtectionActive() {
-        Policy policy = KismartApi.lastPolicy(this);
-        if (DeviceControls.isPaymentLimitActive(policy) || DeviceControls.isFullLockPolicy(policy)) {
-            return true;
+    private String eventText(AccessibilityEvent event) {
+        StringBuilder builder = new StringBuilder();
+        try {
+            if (event.getText() != null) {
+                for (CharSequence item : event.getText()) {
+                    if (item != null) builder.append(' ').append(item);
+                }
+            }
+            if (event.getContentDescription() != null) {
+                builder.append(' ').append(event.getContentDescription());
+            }
+            if (event.getClassName() != null) {
+                builder.append(' ').append(event.getClassName());
+            }
+        } catch (Exception ignored) {
         }
-        if (DeviceControls.isFinancedPolicy(policy)) return true;
-        String imei = KismartApi.prefs(this).getString(KismartApi.KEY_IMEI, "");
-        return imei != null && !imei.trim().isEmpty();
+        return builder.toString().toLowerCase();
     }
 
-    /**
-     * Leave Settings / app-info immediately so the user cannot navigate toward uninstall.
-     */
-    private void kickOutOfRestrictedSurface() {
-        handler.post(() -> {
-            try {
-                performGlobalAction(GLOBAL_ACTION_BACK);
-            } catch (Exception ignored) {
-            }
-            try {
-                performGlobalAction(GLOBAL_ACTION_HOME);
-            } catch (Exception ignored) {
-            }
-        });
+    private String collectQuickScreenText() {
+        AccessibilityNodeInfo root = null;
+        try {
+            root = getRootInActiveWindow();
+            if (root == null) return "";
+            return collectScreenText(root).toLowerCase();
+        } catch (Exception ignored) {
+            return "";
+        } finally {
+            if (root != null) root.recycle();
+        }
+    }
+
+    /** Checks package type and on-screen content for the named restricted surfaces only. */
+    private boolean isDangerousScreenNow(String packageName) {
+        if (isPackageInstallerPackage(packageName)) {
+            String text = collectQuickScreenText();
+            // Block installer when it mentions our app, or any uninstall confirmation while financed/limited.
+            if (mentionsProtectedApp(text) || isUninstallConfirmation(text)) return true;
+        }
+        if (isSettingsLikePackage(packageName) || isPackageInstallerPackage(packageName)) {
+            return isDangerousSettingsScreenContent() || isDangerousRemovalSurfaceContent();
+        }
+        return isDangerousRemovalSurfaceContent();
+    }
+
+    private boolean isDangerousSettingsScreenContent() {
+        AccessibilityNodeInfo root = null;
+        try {
+            root = activeInspectionRoot();
+            if (root == null) return false;
+            String text = collectScreenText(root).toLowerCase();
+            return isRestrictedContent(text);
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (root != null) root.recycle();
+        }
     }
 
     private boolean isDangerousRemovalSurfaceContent() {
@@ -223,10 +260,7 @@ public class KismartAccessibilityService extends AccessibilityService {
             root = activeInspectionRoot();
             if (root == null) return false;
             String text = collectScreenText(root).toLowerCase();
-            return isProtectedAppManagementScreen(text)
-                    || isFactoryResetScreen(text)
-                    || isAccessibilityControlScreen(text)
-                    || isDeviceAdminControlScreen(text);
+            return isProtectedAppManagementScreen(text) || isUninstallConfirmation(text);
         } catch (Exception ignored) {
             return false;
         } finally {
@@ -234,22 +268,35 @@ public class KismartAccessibilityService extends AccessibilityService {
         }
     }
 
-    // ---------- Keyword matchers ----------
+    private boolean isRestrictedContent(String text) {
+        if (text == null || text.isEmpty()) return false;
+        return isFactoryResetScreen(text)
+                || isAccessibilityControlScreen(text)
+                || isDeviceAdminControlScreen(text)
+                || isProtectedAppManagementScreen(text);
+    }
+
+    // ---------- Keyword matchers (named screens only) ----------
     private boolean isFactoryResetScreen(String text) {
+        // Includes Settings search hits for factory reset wording.
         return containsAny(text,
                 "factory reset", "factory data reset", "reset options",
                 "erase all data", "erase all content", "erase all content and settings",
                 "delete all data", "delete all contents", "reset phone", "reset tablet",
-                "wipe data", "format data", "restore factory settings", "clear all data");
+                "wipe data", "format data", "restore factory settings", "clear all data",
+                "erase phone", "erase tablet", "erasing", "factory data");
     }
 
     private boolean isAccessibilityControlScreen(String text) {
         if (!text.contains("accessibility")) return false;
+        // Always block accessibility settings while protection is active (can disable this service).
         if (text.contains("kismart") || text.contains("device service")) return true;
         return containsAny(text,
-                "downloaded apps", "installed apps", "accessibility shortcut",
-                "volume key shortcut", "screen reader", "interaction controls",
-                "use service", "stop service", "turn off", "allow restricted setting");
+                "downloaded apps", "installed apps", "installed services",
+                "accessibility shortcut", "volume key shortcut",
+                "screen reader", "interaction controls", "use service", "stop service",
+                "turn off", "turn on", "allow restricted setting", "device service",
+                "accessibility services", "downloaded services");
     }
 
     private boolean isDeviceAdminControlScreen(String text) {
@@ -260,46 +307,33 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     private boolean isProtectedAppManagementScreen(String text) {
         String lower = text == null ? "" : text.toLowerCase();
-        String appLabel = getString(R.string.app_name).toLowerCase();
-        String packageName = getPackageName().toLowerCase();
-        boolean mentionsProtectedApp = lower.contains("kismart")
-                || lower.contains("device service")
-                || lower.contains(appLabel)
-                || lower.contains(packageName)
-                || lower.contains("africa.volo.kismart");
-        if (!mentionsProtectedApp) {
-            // Still block generic uninstall / app-info surfaces while protection is on.
-            return containsAny(lower,
-                    "uninstall app", "drag here to uninstall", "do you want to uninstall",
-                    "app info", "application info", "app details", "force stop",
-                    "clear data", "clear storage", "clear cache");
-        }
+        if (!mentionsProtectedApp(lower)) return false;
         return containsAny(lower,
                 "uninstall", "uninstall app", "delete", "delete app",
                 "remove app", "remove from device", "remove this app",
                 "app info", "application info", "app details", "manage app", "manage apps",
                 "disable", "deactivate", "device admin", "device administrator",
                 "force stop", "clear data", "clear cache", "storage", "trash",
-                "drag here to uninstall", "open by default", "set as default");
+                "drag here to uninstall", "open by default", "set as default",
+                "permissions", "force stop");
     }
 
-    private boolean isCameraScreen(String packageName) {
-        String value = packageName == null ? "" : packageName.toLowerCase();
-        if (value.contains("camera")) return true;
-        AccessibilityNodeInfo root = null;
-        try {
-            root = activeInspectionRoot();
-            if (root == null) return false;
-            String text = collectScreenText(root).toLowerCase();
-            return containsAny(text,
-                    "camera", "shutter", "take photo", "take a photo",
-                    "video", "record", "flash", "lens", "focus", "zoom",
-                    "switch camera", "photo preview", "capture");
-        } catch (Exception ignored) {
-            return false;
-        } finally {
-            if (root != null) root.recycle();
-        }
+    private boolean isUninstallConfirmation(String text) {
+        return containsAny(text,
+                "do you want to uninstall", "uninstall app", "drag here to uninstall",
+                "this app will be removed", "uninstall this app");
+    }
+
+    private boolean mentionsProtectedApp(String text) {
+        if (text == null || text.isEmpty()) return false;
+        String lower = text.toLowerCase();
+        String appLabel = getString(R.string.app_name).toLowerCase();
+        String packageName = getPackageName().toLowerCase();
+        return lower.contains("kismart")
+                || lower.contains("device service")
+                || lower.contains(appLabel)
+                || lower.contains(packageName)
+                || lower.contains("africa.volo.kismart");
     }
 
     private boolean containsAny(String text, String... needles) {
@@ -311,77 +345,28 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     // ---------- Package type helpers ----------
-    /**
-     * Any package that can reach app info, uninstall, permissions, accessibility, or admin controls.
-     * Matched by package name alone — no waiting for on-screen text.
-     */
-    private boolean isSettingsOrAppManagementPackage(String pkg) {
-        if (pkg == null || pkg.isEmpty()) return false;
-        String v = pkg.toLowerCase();
-        if (getPackageName().equalsIgnoreCase(v)) return false;
-        if ("com.android.settings".equals(v) || v.endsWith(".settings") || v.contains(".settings.")) {
-            return true;
-        }
-        return v.contains("securitycenter")
+    private boolean isSettingsLikePackage(String pkg) {
+        String v = pkg == null ? "" : pkg.toLowerCase();
+        return "com.android.settings".equals(v)
+                || v.endsWith(".settings")
+                || v.contains(".settings.")
+                || v.contains("securitycenter")
                 || v.contains("permissioncontroller")
-                || v.contains("packageinstaller")
-                || v.contains("installer")
                 || v.contains("systemmanager")
                 || v.contains("safecenter")
-                || v.contains("deviceadmin")
-                || v.contains("devicemanager")
-                || v.contains("applicationmanager")
-                || v.contains("appmanager")
-                || v.contains("phonemanager")
-                || v.contains("lool") // Samsung Device care
-                || v.contains("smartmanager")
                 || v.contains("permcenter")
-                || v.contains("purebackground")
-                || v.contains("powerkeeper")
-                || v.contains("digitalwellbeing")
-                || v.equals("com.miui.securitycenter")
-                || v.equals("com.miui.permcenter")
-                || v.equals("com.miui.packageinstaller")
-                || v.equals("com.huawei.systemmanager")
-                || v.equals("com.hihonor.systemmanager")
-                || v.equals("com.coloros.safecenter")
-                || v.equals("com.oplus.safecenter")
-                || v.equals("com.iqoo.secure")
-                || v.equals("com.vivo.permissionmanager")
-                || v.equals("com.samsung.android.lool")
-                || v.equals("com.samsung.android.sm")
-                || v.equals("com.google.android.packageinstaller")
-                || v.equals("com.android.packageinstaller")
-                || v.equals("com.google.android.permissioncontroller")
-                || v.equals("com.android.permissioncontroller")
-                || v.equals("com.android.managedprovisioning")
-                || v.contains("settings.intelligence")
-                || v.contains("companiondevice");
+                || v.contains("smartmanager")
+                || v.contains("settings.intelligence");
     }
 
-    private String topWindowPackageName() {
-        try {
-            for (AccessibilityWindowInfo window : getWindows()) {
-                if (window == null) continue;
-                if (window.getType() != AccessibilityWindowInfo.TYPE_APPLICATION
-                        && window.getType() != AccessibilityWindowInfo.TYPE_SYSTEM) {
-                    continue;
-                }
-                AccessibilityNodeInfo root = window.getRoot();
-                if (root == null) continue;
-                try {
-                    CharSequence packageName = root.getPackageName();
-                    if (packageName == null) continue;
-                    String value = packageName.toString().trim();
-                    if (value.isEmpty() || getPackageName().equals(value)) continue;
-                    return value;
-                } finally {
-                    root.recycle();
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return "";
+    private boolean isPackageInstallerPackage(String pkg) {
+        String v = pkg == null ? "" : pkg.toLowerCase();
+        return v.contains("packageinstaller")
+                || v.contains("installer")
+                || v.equals("com.google.android.packageinstaller")
+                || v.equals("com.android.packageinstaller")
+                || v.equals("com.miui.packageinstaller")
+                || v.equals("com.samsung.android.packageinstaller");
     }
 
     private boolean isLauncherPackage(String packageName) {
@@ -392,12 +377,9 @@ public class KismartAccessibilityService extends AccessibilityService {
                 || v.equals("com.google.android.apps.nexuslauncher");
     }
 
-    // ---------- Allowed packages in limited mode ----------
     private boolean isAllowedSystemPackage(String packageName) {
-        // Basic system packages always allowed
         if ("android".equals(packageName)) return true;
         if ("com.android.systemui".equals(packageName)) return true;
-        // Allow emergency dialer for EMERGENCY_ALLOW_MS after pressing Emergency button
         if (System.currentTimeMillis() < emergencyAllowedUntil && isEmergencyPackage(packageName)) {
             return true;
         }
@@ -436,7 +418,7 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         try {
             blocker = nextBlocker;
-            // Capture touches immediately — do NOT use FLAG_NOT_FOCUSABLE (lets apps stay usable under the overlay).
+            // Capture touches immediately so the user cannot keep navigating under the overlay.
             int flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                     | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                     | WindowManager.LayoutParams.FLAG_SECURE
@@ -469,15 +451,15 @@ public class KismartAccessibilityService extends AccessibilityService {
         if (!blockerVisible || blocker == null || windowManager == null) return;
         try {
             windowManager.removeView(blocker);
-        } catch (Exception ignored) {}
-        finally {
+        } catch (Exception ignored) {
+        } finally {
             blocker = null;
             blockerVisible = false;
             fullLockBlockerVisible = false;
         }
     }
 
-    // ========== Helpers (unchanged) ==========
+    // ========== Helpers ==========
     private String activePackageName() {
         AccessibilityNodeInfo root = null;
         try {
@@ -509,22 +491,6 @@ public class KismartAccessibilityService extends AccessibilityService {
         return getRootInActiveWindow();
     }
 
-    private boolean isKismartLockScreen() {
-        AccessibilityNodeInfo root = null;
-        try {
-            root = getRootInActiveWindow();
-            if (root == null) return false;
-            if (root.getPackageName() == null || !getPackageName().equals(root.getPackageName().toString()))
-                return false;
-            String text = collectScreenText(root).toLowerCase();
-            return text.contains("locked by kismart") || text.contains("admin unlock required");
-        } catch (Exception ignored) {
-            return false;
-        } finally {
-            if (root != null) root.recycle();
-        }
-    }
-
     private String collectScreenText(AccessibilityNodeInfo root) {
         StringBuilder builder = new StringBuilder();
         appendNodeText(root, builder, 0);
@@ -551,7 +517,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         if (!text.isEmpty()) builder.append(' ').append(text);
     }
 
-    // ========== UI (unchanged) ==========
+    // ========== UI ==========
     private View buildFullLockBlocker() {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
