@@ -145,73 +145,86 @@ final class DeviceControls {
         if (policy == null) return;
         hideLauncherEntry(activity);
         enforceFinancedDeviceHardening(activity);
-        // Paid in full (no balance) always clears limit/lock surfaces.
-        if (policy.balance <= 0 || !policy.restrictionActive || "None".equals(policy.restrictionLevel)) {
+        // Unlock only when fully paid. Pay / STK waiting must never clear limit while balance remains.
+        if (policy.balance <= 0) {
             restoreOwnerRestrictions(activity);
             DeviceControls.exitLockTask(activity);
             return;
         }
-        if ("Lock screen message".equals(policy.restrictionLevel)) {
+        if (isFullLockPolicy(policy)) {
+            enforceFullLock(activity);
+            return;
+        }
+        if ("Lock screen message".equals(policy.restrictionLevel) && !isPaymentLimitActive(policy)) {
             setOwnerLockMessage(activity, policy.customerMessage);
             return;
         }
-        if (isPaymentLimitActive(policy)) {
-            if (enforceMissingLimitGuard(activity, policy)) return;
-            enterPaymentOnlyMode(activity, policy);
-            // Surface KISMART pay UI immediately so the user is not left in another app.
-            bringLimitSurfaceToFront(activity);
-            return;
-        }
-        if (isFullLockPolicy(policy)) {
-            enforceFullLock(activity);
-        }
+        // Any unpaid balance → payment-limit mode (KISMART + pay only).
+        if (enforceMissingLimitGuard(activity, policy)) return;
+        enterPaymentOnlyMode(activity, policy);
+        bringLimitSurfaceToFront(activity);
     }
 
     static void applyPolicyFromBackground(Context context, Policy policy) {
         if (policy == null) return;
         hideLauncherEntry(context);
         enforceFinancedDeviceHardening(context);
-        if (policy.balance <= 0 || !policy.restrictionActive || "None".equals(policy.restrictionLevel)) {
+        if (policy.balance <= 0) {
             restoreOwnerRestrictions(context);
-            return;
-        }
-        if ("Lock screen message".equals(policy.restrictionLevel)) {
-            setOwnerLockMessage(context, policy.customerMessage);
-            return;
-        }
-        if (isPaymentLimitActive(policy)) {
-            if (enforceMissingLimitGuard(context, policy)) return;
-            applyPaymentOnlyRestrictions(context, policy);
-            // Kick the accessibility guard + pay screen immediately (do not wait for next app switch).
-            bringLimitSurfaceToFront(context);
             return;
         }
         if (isFullLockPolicy(policy)) {
             enforceFullLock(context);
+            return;
         }
+        if ("Lock screen message".equals(policy.restrictionLevel) && !isPaymentLimitActive(policy)) {
+            setOwnerLockMessage(context, policy.customerMessage);
+            return;
+        }
+        if (enforceMissingLimitGuard(context, policy)) return;
+        applyPaymentOnlyRestrictions(context, policy);
+        bringLimitSurfaceToFront(context);
     }
 
     private static long lastLimitBringFrontAt;
+    private static long lastForcePaymentScreenAt;
 
     /**
-     * Force the limit experience into the foreground as soon as policy becomes Limited access.
-     * The accessibility overlay still covers other apps; this reduces the multi-second gap.
+     * Force the payment screen into the foreground whenever debt remains.
+     * Used aggressively so the user cannot stay on any other app/UI.
      */
     static void bringLimitSurfaceToFront(Context context) {
-        if (!isPaymentLimitActive(KismartApi.lastPolicy(context))) return;
+        Policy policy = KismartApi.lastPolicy(context);
+        // Any unpaid balance forces the payment screen — no other UI is allowed.
+        if (!mustStayOnPaymentScreen(policy)) return;
         long now = System.currentTimeMillis();
-        // Avoid yanking the user every sync tick while limit stays on.
-        if (now - lastLimitBringFrontAt < 8000L) return;
+        // Tight throttle so navigation away is reversed almost immediately.
+        if (now - lastLimitBringFrontAt < 1200L) return;
         lastLimitBringFrontAt = now;
+        forcePaymentScreen(context);
+    }
+
+    /** Open the payment UI (MainActivity). Lightly throttled to avoid intent spam. */
+    static void forcePaymentScreen(Context context) {
+        long now = System.currentTimeMillis();
+        if (now - lastForcePaymentScreenAt < 700L) return;
+        lastForcePaymentScreenAt = now;
         try {
             Intent intent = new Intent(context, MainActivity.class);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP
                     | Intent.FLAG_ACTIVITY_SINGLE_TOP
-                    | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+                    | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                    | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+            intent.putExtra("kismart_payment_lock", true);
             context.startActivity(intent);
         } catch (Exception ignored) {
         }
+    }
+
+    /** True while any financed balance remains — user must stay on payment UI. */
+    static boolean mustStayOnPaymentScreen(Policy policy) {
+        return policy != null && policy.balance > 0;
     }
 
     static void enforceFullLock(Context context) {
@@ -300,7 +313,12 @@ final class DeviceControls {
 
     private static void enterPaymentOnlyMode(Activity activity, Policy policy) {
         applyPaymentOnlyRestrictions(activity, policy);
+        // Pin ONLY the KISMART payment app — no other packages in lock task.
         enterLockTaskIfOwner(activity, paymentOnlyPackages(activity, policy));
+        // Keep MainActivity focused so the user cannot leave the pay screen.
+        if (!(activity instanceof MainActivity)) {
+            forcePaymentScreen(activity);
+        }
     }
 
     private static void enterLockTaskIfOwner(Activity activity, String[] allowedPackages) {

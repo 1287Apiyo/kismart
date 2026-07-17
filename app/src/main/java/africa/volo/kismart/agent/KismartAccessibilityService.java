@@ -20,13 +20,9 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
- * Shows the limit / protection overlay immediately on restricted surfaces only:
- * - KISMART / Device Service app info & uninstall paths
- * - Factory reset (including Settings search results)
- * - Accessibility control screens
- * - Device admin deactivation screens
- *
- * Normal Settings (Wi‑Fi, display, etc.) stay usable.
+ * Payment-debt lockdown + uninstall protection.
+ * - While balance &gt; 0: ONLY the KISMART payment screen is allowed; every other app/surface is blocked.
+ * - Always protects Device Service uninstall / factory reset / accessibility tampering.
  */
 public class KismartAccessibilityService extends AccessibilityService {
     private static final long WATCHDOG_INTERVAL_MS = 200L;
@@ -288,22 +284,27 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // Limit mode: block other apps; allow normal Settings unless restricted content above.
-        if (DeviceControls.isPaymentLimitActive(policy)) {
-            if (packageName.isEmpty()) return;
-            if (isLauncherPackage(packageName) || isAllowedSystemPackage(packageName)) {
+        // Unpaid debt: ONLY the KISMART payment screen is allowed. No Settings, launcher,
+        // browser, or other apps until payment is confirmed (balance cleared).
+        if (DeviceControls.isPaymentLimitActive(policy) || (policy != null && policy.balance > 0)) {
+            // Emergency dialer grace window after user taps Emergency 112.
+            if (System.currentTimeMillis() < emergencyAllowedUntil) {
                 hideBlockerNow();
                 return;
             }
-            if (isSettingsLikePackage(packageName)) {
+            // Brief grace while we launch KISMART itself.
+            if (System.currentTimeMillis() < allowKismartOpenUntil
+                    && (packageName.isEmpty() || getPackageName().equals(packageName))) {
                 hideBlockerNow();
                 return;
             }
-            if (System.currentTimeMillis() < allowKismartOpenUntil && isOverlayEventPackage(packageName)) {
-                hideBlockerNow();
+            if (packageName.isEmpty() || !getPackageName().equals(packageName)) {
+                showBlockerNow();
+                // Immediately yank the user back to the payment screen.
+                openPaymentPrompt();
                 return;
             }
-            showBlockerNow();
+            hideBlockerNow();
             return;
         }
 
@@ -845,13 +846,7 @@ public class KismartAccessibilityService extends AccessibilityService {
     private void openPaymentPrompt() {
         allowKismartOpenUntil = System.currentTimeMillis() + KISMART_OPEN_ALLOW_MS;
         hideBlockerNow();
-        Intent intent = new Intent(this, MainActivity.class);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        try {
-            startActivity(intent);
-        } catch (Exception ignored) {
-            performGlobalAction(GLOBAL_ACTION_HOME);
-        }
+        DeviceControls.forcePaymentScreen(this);
     }
 
     private int dp(int value) {

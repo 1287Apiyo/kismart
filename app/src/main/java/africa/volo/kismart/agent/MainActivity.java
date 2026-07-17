@@ -57,8 +57,14 @@ public class MainActivity extends Activity {
     private final Runnable monitorRunnable = new Runnable() {
         @Override
         public void run() {
+            Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(MainActivity.this);
+            // While unpaid, re-pin payment UI every cycle so nothing else can stay open.
+            if (DeviceControls.mustStayOnPaymentScreen(policy)) {
+                DeviceControls.applyPolicy(MainActivity.this, policy);
+            }
             autoSync();
-            monitorHandler.postDelayed(this, 5000L);
+            long delay = DeviceControls.mustStayOnPaymentScreen(policy) ? 2000L : 5000L;
+            monitorHandler.postDelayed(this, delay);
         }
     };
 
@@ -98,6 +104,39 @@ public class MainActivity extends Activity {
         }
     }
 
+    @Override
+    public void onBackPressed() {
+        // Unpaid debt: trap on payment screen — back must not leave KISMART.
+        Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
+        if (DeviceControls.mustStayOnPaymentScreen(policy)) {
+            DeviceControls.applyPolicy(this, policy);
+            setDetail("Payment required. Pay via M-Pesa to unlock this phone.");
+            return;
+        }
+        super.onBackPressed();
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        // If the user tries Home/Recents while debt remains, pull them back to Pay.
+        Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
+        if (DeviceControls.mustStayOnPaymentScreen(policy)) {
+            monitorHandler.postDelayed(() -> DeviceControls.forcePaymentScreen(MainActivity.this), 250L);
+            monitorHandler.postDelayed(() -> DeviceControls.applyPolicy(MainActivity.this, policy), 400L);
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) return;
+        Policy policy = latestPolicy != null ? latestPolicy : KismartApi.lastPolicy(this);
+        if (DeviceControls.mustStayOnPaymentScreen(policy)) {
+            monitorHandler.postDelayed(() -> DeviceControls.forcePaymentScreen(MainActivity.this), 200L);
+        }
+    }
+
     private boolean openLockScreenIfFullLockActive() {
         Intent intent = getIntent();
         if (intent != null
@@ -115,6 +154,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         monitorHandler.removeCallbacks(monitorRunnable);
+        monitorHandler.removeCallbacks(paymentPollRunnable);
         executor.shutdownNow();
         super.onDestroy();
     }
@@ -328,6 +368,10 @@ public class MainActivity extends Activity {
         if (paymentButton != null) paymentButton.setEnabled(false);
         setDetail("Sending M-Pesa STK prompt...");
         paymentBalanceBefore = latestPolicy == null ? 0 : latestPolicy.balance;
+        // Keep limit active while we request STK — never unlock just because Pay was tapped.
+        if (latestPolicy != null && latestPolicy.balance > 0) {
+            DeviceControls.applyPolicy(this, latestPolicy);
+        }
         executor.execute(() -> {
             try {
                 JSONObject result = KismartApi.submitPaybillStk(this, amount, phoneNumber);
@@ -336,15 +380,34 @@ public class MainActivity extends Activity {
                         "message",
                         "M-Pesa STK prompt sent. Enter your PIN on the phone to complete payment."
                 );
+                JSONObject policyJson = result.optJSONObject("policy");
+                Policy returnedPolicy = null;
+                if (policyJson != null) {
+                    try {
+                        returnedPolicy = Policy.fromJson(policyJson);
+                        KismartApi.persistPolicy(this, policyJson);
+                    } catch (Exception ignored) {
+                    }
+                }
+                final Policy policyToApply = returnedPolicy;
                 runOnUiThread(() -> {
+                    if (policyToApply != null) {
+                        DeviceControls.applyPolicy(this, policyToApply);
+                        renderPolicy(policyToApply);
+                    } else if (latestPolicy != null && latestPolicy.balance > 0) {
+                        DeviceControls.applyPolicy(this, latestPolicy);
+                    }
                     paymentPending = true;
                     paymentPollAttempts = 0;
                     setDetail(message + (sentTo == null || sentTo.isEmpty() ? "" : " (" + sentTo + ")"));
-                    schedulePaymentPoll(4000);
+                    schedulePaymentPoll(3000);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
                     paymentPending = false;
+                    if (latestPolicy != null && latestPolicy.balance > 0) {
+                        DeviceControls.applyPolicy(this, latestPolicy);
+                    }
                     updatePaymentButton(latestPolicy);
                     setDetail("Payment request failed: " + error.getMessage());
                 });
@@ -360,11 +423,12 @@ public class MainActivity extends Activity {
     private void pollPaymentStatus() {
         if (!paymentPending) return;
         paymentPollAttempts += 1;
-        setDetail("Waiting for M-Pesa confirmation... (" + paymentPollAttempts + ")");
+        setDetail("Waiting for M-Pesa PIN / confirmation... (" + paymentPollAttempts + ")");
         executor.execute(() -> {
             try {
                 Policy policy = KismartApi.sync(this);
                 runOnUiThread(() -> {
+                    // Always re-apply limit while unpaid — STK wait must not free the phone.
                     DeviceControls.applyPolicy(this, policy);
                     renderPolicy(policy);
                     boolean paidDown = policy.balance < paymentBalanceBefore;
@@ -377,22 +441,36 @@ public class MainActivity extends Activity {
                                 : "Payment confirmed. Balance updated to " + formatKes(policy.balance) + ".");
                         return;
                     }
-                    if (paymentPollAttempts >= 15) {
+                    if (policy.isPendingStkFailed()) {
                         paymentPending = false;
+                        monitorHandler.removeCallbacks(paymentPollRunnable);
                         updatePaymentButton(policy);
-                        setDetail("Still waiting for M-Pesa. If you paid, tap Sync. If not, try Pay again.");
+                        String fail = policy.pendingStkMessage;
+                        if (fail == null || fail.trim().isEmpty()) {
+                            fail = "M-Pesa did not confirm the payment prompt.";
+                        }
+                        setDetail("M-Pesa STK failed: " + fail + " Limit stays on until you pay. Tap Pay to try again.");
                         return;
                     }
-                    schedulePaymentPoll(5000);
+                    if (paymentPollAttempts >= 20) {
+                        paymentPending = false;
+                        updatePaymentButton(policy);
+                        setDetail("Still waiting for M-Pesa. If no PIN dialog appeared, tap Pay again. Limit stays on until payment is confirmed.");
+                        return;
+                    }
+                    schedulePaymentPoll(4000);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
-                    if (paymentPollAttempts >= 15) {
+                    if (latestPolicy != null && latestPolicy.balance > 0) {
+                        DeviceControls.applyPolicy(this, latestPolicy);
+                    }
+                    if (paymentPollAttempts >= 20) {
                         paymentPending = false;
                         updatePaymentButton(latestPolicy);
-                        setDetail("Could not confirm payment yet. Check M-Pesa, then tap Sync.");
+                        setDetail("Could not confirm payment yet. Limit stays on. Check M-Pesa, then tap Pay or Sync.");
                     } else {
-                        schedulePaymentPoll(5000);
+                        schedulePaymentPoll(4000);
                     }
                 });
             }

@@ -29,7 +29,7 @@ final class KismartApi {
     static final String KEY_INSTALL_ID = "install_id";
     static final String KEY_BINDING_TOKEN = "binding_token";
     private static final String KEY_APPLIED_COMMAND_IDS = "applied_command_ids";
-    static final String APP_VERSION = "android-1.0.49";
+    static final String APP_VERSION = "android-1.0.52";
     /**
      * Public HTTPS control plane. Phones must use this (or another public host) so lock/restore
      * works from mobile data and any Wi-Fi, not only the shop LAN.
@@ -47,7 +47,8 @@ final class KismartApi {
     /** Must match server KISMART_DEVICE_SYNC_SECRET (local .env and production). */
     static final String DEFAULT_DEVICE_SECRET = "4321";
     private static final int CONNECT_TIMEOUT_MS = 20000;
-    private static final int READ_TIMEOUT_MS = 30000;
+    /** STK path authenticates with Daraja and may verify prompt delivery for several seconds. */
+    private static final int READ_TIMEOUT_MS = 60000;
 
     private KismartApi() {
     }
@@ -187,7 +188,7 @@ final class KismartApi {
                 if (response.contains("Device identity is missing")) {
                     throw new IllegalStateException("Device identity is missing. Reinstall the latest KISMART agent and sync again.");
                 }
-                throw new IllegalStateException(response.isEmpty() ? "Backend request failed: " + status : response);
+                throw new IllegalStateException(friendlyHttpError(status, response));
             }
             return new JSONObject(response);
         } catch (SocketTimeoutException error) {
@@ -207,6 +208,27 @@ final class KismartApi {
         } finally {
             if (connection != null) connection.disconnect();
         }
+    }
+
+    private static String friendlyHttpError(int status, String response) {
+        if (response == null || response.trim().isEmpty()) {
+            return "Backend request failed: " + status;
+        }
+        try {
+            JSONObject json = new JSONObject(response);
+            String detail = json.optString("detail", "").trim();
+            String error = json.optString("error", "").trim();
+            String message = json.optString("message", "").trim();
+            if (!detail.isEmpty()) return detail;
+            if (!message.isEmpty()) return message;
+            if (!error.isEmpty()) return error;
+        } catch (Exception ignored) {
+        }
+        String trimmed = response.trim();
+        if (trimmed.length() > 280) {
+            return trimmed.substring(0, 277) + "...";
+        }
+        return trimmed;
     }
 
     private static void addDeviceIdentityHeaders(Context context, HttpURLConnection connection) throws Exception {
@@ -267,7 +289,7 @@ final class KismartApi {
         return value == null ? "" : value.trim();
     }
 
-    private static void persistPolicy(Context context, JSONObject policy) {
+    static void persistPolicy(Context context, JSONObject policy) {
         SharedPreferences.Editor editor = prefs(context).edit();
         JSONObject identity = policy.optJSONObject("identity");
         if (identity != null) {

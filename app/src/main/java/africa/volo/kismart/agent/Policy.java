@@ -27,6 +27,9 @@ final class Policy {
     final boolean paymentOnlyActive;
     final boolean mpesaReady;
     final String[] allowedPaymentPackages;
+    final String pendingStkStatus;
+    final String pendingStkMessage;
+    final String pendingStkReference;
 
     private Policy(
             String contractId,
@@ -46,7 +49,10 @@ final class Policy {
             int identityMismatchCount,
             boolean paymentOnlyActive,
             boolean mpesaReady,
-            String[] allowedPaymentPackages
+            String[] allowedPaymentPackages,
+            String pendingStkStatus,
+            String pendingStkMessage,
+            String pendingStkReference
     ) {
         this.contractId = contractId;
         this.customer = customer;
@@ -66,12 +72,16 @@ final class Policy {
         this.paymentOnlyActive = paymentOnlyActive;
         this.mpesaReady = mpesaReady;
         this.allowedPaymentPackages = allowedPaymentPackages;
+        this.pendingStkStatus = pendingStkStatus;
+        this.pendingStkMessage = pendingStkMessage;
+        this.pendingStkReference = pendingStkReference;
     }
 
     static Policy fromJson(JSONObject object) {
         JSONObject restriction = object.optJSONObject("restriction");
         JSONObject identity = object.optJSONObject("identity");
         JSONObject paymentOnly = object.optJSONObject("paymentOnly");
+        JSONObject pendingStk = object.optJSONObject("pendingStk");
         JSONArray commands = object.optJSONArray("pendingCommands");
         int balance = object.optInt("balance", 0);
         if (paymentOnly != null && paymentOnly.has("balance")) {
@@ -84,19 +94,22 @@ final class Policy {
         boolean restrictionActive = restriction != null && restriction.optBoolean("active", false);
         String restrictionLevel = restriction == null ? "None" : restriction.optString("level", "None");
 
-        // Limit screen is only valid while there is still a financed balance to pay.
+        // Limit stays on while any financed balance remains (server paymentOnly.active).
         boolean paymentOnlyActive = paymentOnly != null
                 ? paymentOnly.optBoolean("active", false)
                 : restrictionActive && "Limited access".equals(restrictionLevel);
+        // Client-side safety: unpaid balance always keeps limit UX until server confirms paid.
+        if (balance > 0 && !"Full lock".equals(restrictionLevel)) {
+            paymentOnlyActive = true;
+            restrictionActive = true;
+            restrictionLevel = "Limited access";
+        }
         if (balance <= 0) {
             paymentOnlyActive = false;
             if ("Limited access".equals(restrictionLevel) || "Full lock".equals(restrictionLevel)) {
                 restrictionActive = false;
                 restrictionLevel = "None";
             }
-        } else if (paymentOnlyActive) {
-            restrictionActive = true;
-            restrictionLevel = "Limited access";
         }
 
         int nextAmount = object.optInt("nextAmount", 0);
@@ -118,13 +131,30 @@ final class Policy {
                 identity == null ? 0 : identity.optInt("mismatchCount", 0),
                 paymentOnlyActive,
                 object.optBoolean("mpesaReady", true),
-                parseAllowedPackages(object.optJSONArray("allowedPaymentPackages"), paymentOnly == null ? null : paymentOnly.optJSONArray("allowedPackages"))
+                parseAllowedPackages(object.optJSONArray("allowedPaymentPackages"), paymentOnly == null ? null : paymentOnly.optJSONArray("allowedPackages")),
+                pendingStk == null ? "" : pendingStk.optString("status", ""),
+                pendingStk == null ? "" : pendingStk.optString("message", ""),
+                pendingStk == null ? "" : pendingStk.optString("reference", "")
         );
     }
 
-    /** True only when the server says limit is on and a payable balance remains. */
+    /**
+     * True while unpaid balance remains — the only allowed UI is the payment screen
+     * until a real payment is confirmed and balance reaches zero.
+     */
     boolean shouldShowLimitScreen() {
-        return paymentOnlyActive && balance > 0;
+        if (balance <= 0) return false;
+        // Full lock is a different surface; still unpaid debt blocks free use.
+        if ("Full lock".equals(restrictionLevel) && restrictionActive) return false;
+        return true;
+    }
+
+    boolean isPendingStkFailed() {
+        return "Failed".equalsIgnoreCase(pendingStkStatus == null ? "" : pendingStkStatus.trim());
+    }
+
+    boolean isPendingStkPending() {
+        return "Pending".equalsIgnoreCase(pendingStkStatus == null ? "" : pendingStkStatus.trim());
     }
 
     private static String[] parseAllowedPackages(JSONArray... arrays) {
