@@ -243,10 +243,15 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // User tapped Pay Now — keep overlay OFF and keep launching MainActivity.
-        if (System.currentTimeMillis() < allowKismartOpenUntil) {
+        // User tapped Pay Now — keep overlay OFF while MainActivity comes forward.
+        if (isPaymentUiHandoffActive()) {
             hideBlockerNow();
-            DeviceControls.openPaymentScreenNow(this);
+            if (isKismartInForeground()) {
+                allowKismartOpenUntil = 0L;
+                DeviceControls.clearPaymentUiOpening(this);
+            } else {
+                DeviceControls.openPaymentScreenNow(this);
+            }
             return;
         }
 
@@ -688,7 +693,7 @@ public class KismartAccessibilityService extends AccessibilityService {
             hideBlockerNow();
             return;
         }
-        if (System.currentTimeMillis() < allowKismartOpenUntil) {
+        if (isPaymentUiHandoffActive()) {
             hideBlockerNow();
             return;
         }
@@ -909,6 +914,7 @@ public class KismartAccessibilityService extends AccessibilityService {
     private void openPaymentPrompt() {
         // Critical path: hide overlay FIRST, then open MainActivity, keep overlay off until Pay is up.
         allowKismartOpenUntil = System.currentTimeMillis() + KISMART_OPEN_ALLOW_MS;
+        DeviceControls.markPaymentUiOpening(this, KISMART_OPEN_ALLOW_MS);
         hideBlockerNow();
         DeviceControls.openPaymentScreenNow(this);
         // Retries: startActivity from accessibility can race overlay teardown.
@@ -928,8 +934,16 @@ public class KismartAccessibilityService extends AccessibilityService {
             hideBlockerNow();
             if (!isKismartInForeground()) {
                 DeviceControls.openPaymentScreenNow(this);
+            } else {
+                allowKismartOpenUntil = 0L;
+                DeviceControls.clearPaymentUiOpening(this);
             }
         }, 1500L);
+    }
+
+    private boolean isPaymentUiHandoffActive() {
+        if (System.currentTimeMillis() < allowKismartOpenUntil) return true;
+        return DeviceControls.isPaymentUiOpening(this);
     }
 
     private int dp(int value) {

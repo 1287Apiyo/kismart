@@ -32,6 +32,8 @@ final class DeviceControls {
     private static final String KEY_ADMIN_UNLOCK_UNTIL = "admin_unlock_until";
     /** STK PIN window — limit UI suspended only while Safaricom prompt is expected. */
     private static final String KEY_STK_EXEMPT_UNTIL = "stk_prompt_exempt_until";
+    /** Short handoff window after Continue to pay opens the KISMART payment UI. */
+    private static final String KEY_PAYMENT_UI_OPEN_UNTIL = "payment_ui_open_until";
     /** Admin may stay in AdminSetup this long after correct passcode (not free phone use). */
     private static final long ADMIN_SESSION_MS = 30L * 60L * 1000L;
     /**
@@ -39,6 +41,7 @@ final class DeviceControls {
      * if not confirmed, limit screen returns and user cannot leave Pay.
      */
     private static final long STK_EXEMPT_DEFAULT_MS = 10L * 1000L;
+    private static final long PAYMENT_UI_OPEN_DEFAULT_MS = 25L * 1000L;
     private static final Handler STK_HANDLER = new Handler(Looper.getMainLooper());
     private static Runnable pendingStkResumeRunnable;
     static final String FULL_LOCK_MESSAGE = "";
@@ -257,6 +260,31 @@ final class DeviceControls {
         if (now - lastForcePaymentScreenAt < 500L) return;
         lastForcePaymentScreenAt = now;
         openPaymentScreenNow(context);
+    }
+
+    static void markPaymentUiOpening(Context context) {
+        markPaymentUiOpening(context, PAYMENT_UI_OPEN_DEFAULT_MS);
+    }
+
+    static void markPaymentUiOpening(Context context, long durationMs) {
+        long duration = Math.max(3_000L, Math.min(durationMs, 30_000L));
+        KismartApi.prefs(context.getApplicationContext()).edit()
+                .putLong(KEY_PAYMENT_UI_OPEN_UNTIL, System.currentTimeMillis() + duration)
+                .apply();
+    }
+
+    static boolean isPaymentUiOpening(Context context) {
+        long until = KismartApi.prefs(context.getApplicationContext()).getLong(KEY_PAYMENT_UI_OPEN_UNTIL, 0L);
+        if (until <= 0L) return false;
+        if (System.currentTimeMillis() >= until) {
+            KismartApi.prefs(context.getApplicationContext()).edit().remove(KEY_PAYMENT_UI_OPEN_UNTIL).apply();
+            return false;
+        }
+        return true;
+    }
+
+    static void clearPaymentUiOpening(Context context) {
+        KismartApi.prefs(context.getApplicationContext()).edit().remove(KEY_PAYMENT_UI_OPEN_UNTIL).apply();
     }
 
     /** Unthrottled open of MainActivity (Pay Now button / hard trap). */
