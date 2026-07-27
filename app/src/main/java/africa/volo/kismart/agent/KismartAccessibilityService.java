@@ -62,6 +62,7 @@ public class KismartAccessibilityService extends AccessibilityService {
     private boolean fullLockBlockerVisible;
     private long emergencyAllowedUntil;
     private long allowKismartOpenUntil;
+    private long lastPaymentHandoffOpenAt;
     /** Sticky latch: once Device Service app info is seen, keep overlay until user leaves. */
     private long protectedSurfaceUntil;
     /** True while Settings App Details / Uninstaller activity class is in the foreground. */
@@ -250,7 +251,7 @@ public class KismartAccessibilityService extends AccessibilityService {
                 allowKismartOpenUntil = 0L;
                 DeviceControls.clearPaymentUiOpening(this);
             } else {
-                DeviceControls.openPaymentScreenNow(this);
+                openPaymentScreenDuringHandoff();
             }
             return;
         }
@@ -340,6 +341,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         try {
             for (AccessibilityWindowInfo window : getWindows()) {
                 if (window == null) continue;
+                if (window.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
                 AccessibilityNodeInfo root = window.getRoot();
                 if (root == null) continue;
                 try {
@@ -355,7 +357,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         }
         try {
             AccessibilityNodeInfo active = getRootInActiveWindow();
-            if (active != null) {
+            if (active != null && !blockerVisible) {
                 try {
                     CharSequence pkg = active.getPackageName();
                     return pkg != null && getPackageName().equals(pkg.toString());
@@ -914,31 +916,44 @@ public class KismartAccessibilityService extends AccessibilityService {
     private void openPaymentPrompt() {
         // Critical path: hide overlay FIRST, then open MainActivity, keep overlay off until Pay is up.
         allowKismartOpenUntil = System.currentTimeMillis() + KISMART_OPEN_ALLOW_MS;
+        lastPaymentHandoffOpenAt = 0L;
         DeviceControls.markPaymentUiOpening(this, KISMART_OPEN_ALLOW_MS);
         hideBlockerNow();
-        DeviceControls.openPaymentScreenNow(this);
+        openPaymentScreenDuringHandoff(true);
         // Retries: startActivity from accessibility can race overlay teardown.
         handler.post(() -> {
             hideBlockerNow();
-            DeviceControls.openPaymentScreenNow(this);
+            openPaymentScreenDuringHandoff(false);
         });
         handler.postDelayed(() -> {
             hideBlockerNow();
-            DeviceControls.openPaymentScreenNow(this);
+            openPaymentScreenDuringHandoff(false);
         }, 300L);
         handler.postDelayed(() -> {
             hideBlockerNow();
-            DeviceControls.openPaymentScreenNow(this);
+            openPaymentScreenDuringHandoff(false);
         }, 800L);
         handler.postDelayed(() -> {
             hideBlockerNow();
             if (!isKismartInForeground()) {
-                DeviceControls.openPaymentScreenNow(this);
+                lastPaymentHandoffOpenAt = 0L;
+                openPaymentScreenDuringHandoff(false);
             } else {
                 allowKismartOpenUntil = 0L;
                 DeviceControls.clearPaymentUiOpening(this);
             }
         }, 1500L);
+    }
+
+    private void openPaymentScreenDuringHandoff() {
+        openPaymentScreenDuringHandoff(false);
+    }
+
+    private void openPaymentScreenDuringHandoff(boolean forceNewTask) {
+        long now = System.currentTimeMillis();
+        if (now - lastPaymentHandoffOpenAt < 650L) return;
+        lastPaymentHandoffOpenAt = now;
+        DeviceControls.openPaymentScreenNow(this, forceNewTask);
     }
 
     private boolean isPaymentUiHandoffActive() {
