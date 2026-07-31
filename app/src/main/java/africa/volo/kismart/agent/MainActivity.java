@@ -63,6 +63,7 @@ public class MainActivity extends Activity {
     };
 
     private final Runnable reassertIfLeftRunnable = () -> {
+        if (DeviceControls.isAdminSessionActive(MainActivity.this)) return;
         // Only re-open if we truly left this screen (not focus glitches from dialogs/lock-task).
         if (activityResumed && windowHasFocus) return;
         if (!paymentLockActive()) return;
@@ -116,6 +117,7 @@ public class MainActivity extends Activity {
     protected void onPause() {
         activityResumed = false;
         super.onPause();
+        if (DeviceControls.isAdminSessionActive(this)) return;
         // Unpaid: if user actually leaves (Home/Recents), pull back after a short settle delay.
         // Do not fire immediately — that restarts MainActivity and kills Pay button taps.
         scheduleReturnIfLeft(500L);
@@ -185,6 +187,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onUserLeaveHint() {
         super.onUserLeaveHint();
+        if (DeviceControls.isAdminSessionActive(this)) return;
         scheduleReturnIfLeft(350L);
     }
 
@@ -198,6 +201,7 @@ public class MainActivity extends Activity {
             return;
         }
         // Focus loss from AlertDialog / keyboard / STK must not restart this activity.
+        if (DeviceControls.isAdminSessionActive(this)) return;
         if (DeviceControls.isStkPromptExempt(this)) return;
         if (paymentLockActive()) {
             scheduleReturnIfLeft(700L);
@@ -229,6 +233,7 @@ public class MainActivity extends Activity {
     }
 
     private void scheduleReturnIfLeft(long delayMs) {
+        if (DeviceControls.isAdminSessionActive(this)) return;
         if (!paymentLockActive()) return;
         if (DeviceControls.isStkPromptExempt(this)) return;
         monitorHandler.removeCallbacks(reassertIfLeftRunnable);
@@ -303,13 +308,10 @@ public class MainActivity extends Activity {
         header.setPadding(0, dp(4), 0, dp(28));
 
         ImageView logo = UiTheme.logo(this, 44);
-        // Hidden admin path only when account is paid. While unpaid, only Pay via M-Pesa is allowed.
+        logo.setClickable(true);
+        logo.setFocusable(true);
+        logo.setOnClickListener(view -> showAdminUnlock());
         logo.setOnLongClickListener(view -> {
-            if (paymentLockActive()) {
-                setDetail("Payment required. Tap Pay via M-Pesa and complete payment to unlock.");
-                ensurePayButtonClickable();
-                return true;
-            }
             showAdminUnlock();
             return true;
         });

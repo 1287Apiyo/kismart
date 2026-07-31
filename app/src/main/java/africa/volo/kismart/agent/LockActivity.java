@@ -1,20 +1,24 @@
 package africa.volo.kismart.agent;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -26,6 +30,7 @@ public class LockActivity extends Activity {
     private static final int BLACK = Color.rgb(0, 0, 0);
     private static final int GREEN = Color.rgb(22, 163, 74);
     private static final long RESTORE_CHECK_MS = 3000L;
+    private static final String ADMIN_PIN = "4321";
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -77,6 +82,7 @@ public class LockActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        if (DeviceControls.isAdminSessionActive(this)) return;
         if (locked) {
             handler.post(() -> DeviceControls.enforceFullLock(this));
         }
@@ -85,6 +91,7 @@ public class LockActivity extends Activity {
     @Override
     protected void onStop() {
         super.onStop();
+        if (DeviceControls.isAdminSessionActive(this)) return;
         if (locked) handler.post(() -> DeviceControls.enforceFullLock(this));
     }
 
@@ -93,6 +100,8 @@ public class LockActivity extends Activity {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             enterStrictVisualMode();
+        } else if (DeviceControls.isAdminSessionActive(this)) {
+            return;
         } else if (locked) {
             handler.post(() -> DeviceControls.enforceFullLock(this));
         }
@@ -141,6 +150,13 @@ public class LockActivity extends Activity {
         card.setPadding(dp(22), dp(28), dp(22), dp(24));
 
         ImageView logo = UiTheme.logo(this, 56);
+        logo.setClickable(true);
+        logo.setFocusable(true);
+        logo.setOnClickListener(view -> showAdminUnlock());
+        logo.setOnLongClickListener(view -> {
+            showAdminUnlock();
+            return true;
+        });
         LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(56), dp(56));
         logoParams.gravity = Gravity.CENTER_HORIZONTAL;
         logoParams.bottomMargin = dp(16);
@@ -166,6 +182,35 @@ public class LockActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT
         ));
         return root;
+    }
+
+    private void showAdminUnlock() {
+        EditText pin = new EditText(this);
+        pin.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        pin.setSingleLine(true);
+        pin.setHint("Admin passcode");
+        new AlertDialog.Builder(this)
+                .setTitle("Admin access")
+                .setMessage("Correct passcode opens Admin Setup only. Full lock resumes when setup is closed unless admin restores the device.")
+                .setView(pin)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Open", (dialog, which) -> {
+                    String value = pin.getText() == null ? "" : pin.getText().toString().trim();
+                    SharedPreferences prefs = KismartApi.prefs(this);
+                    String deviceSecret = prefs.getString(KismartApi.KEY_SECRET, "");
+                    if (ADMIN_PIN.equals(value)
+                            || KismartApi.DEFAULT_DEVICE_SECRET.equals(value)
+                            || (deviceSecret != null && !deviceSecret.isEmpty() && value.equals(deviceSecret))) {
+                        DeviceControls.grantAdminSession(this);
+                        Intent intent = new Intent(this, AdminSetupActivity.class);
+                        intent.putExtra(AdminSetupReceiver.ACTION_EXTRA_ADMIN_VERIFIED, true);
+                        startActivity(intent);
+                    } else {
+                        status.setText("Admin access denied. Check passcode.");
+                        status.setTextColor(UiTheme.DANGER);
+                    }
+                })
+                .show();
     }
 
     private void render(Policy policy) {

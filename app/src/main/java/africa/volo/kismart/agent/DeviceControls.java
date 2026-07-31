@@ -216,6 +216,9 @@ final class DeviceControls {
         if (policy == null) return;
         hideLauncherEntry(context);
         enforceFinancedDeviceHardening(context);
+        if (isAdminSessionActive(context)) {
+            return;
+        }
         if (isStkPromptExempt(context)) {
             suspendLimitUiForStk(context);
             return;
@@ -245,6 +248,7 @@ final class DeviceControls {
      * Force the payment screen into the foreground whenever debt remains.
      */
     static void bringLimitSurfaceToFront(Context context) {
+        if (isAdminSessionActive(context)) return;
         if (isStkPromptExempt(context)) return;
         if (!mustStayOnPaymentScreen(context)) return;
         long now = System.currentTimeMillis();
@@ -255,6 +259,7 @@ final class DeviceControls {
 
     /** Open the payment UI (MainActivity). Lightly throttled to avoid intent spam. */
     static void forcePaymentScreen(Context context) {
+        if (isAdminSessionActive(context)) return;
         if (isStkPromptExempt(context)) return;
         long now = System.currentTimeMillis();
         if (now - lastForcePaymentScreenAt < 500L) return;
@@ -294,6 +299,7 @@ final class DeviceControls {
 
     /** Unthrottled open of MainActivity (Pay Now button / hard trap). */
     static void openPaymentScreenNow(Context context, boolean forceNewTask) {
+        if (isAdminSessionActive(context)) return;
         if (isStkPromptExempt(context)) return;
         markPaymentUiOpening(context, PAYMENT_UI_OPEN_DEFAULT_MS);
         try {
@@ -407,6 +413,7 @@ final class DeviceControls {
      * unpaid → limit on + trap on Pay screen; paid → full access.
      */
     static void resumePaymentLimitAfterStk(Context context) {
+        if (isAdminSessionActive(context)) return;
         KismartApi.prefs(context).edit().remove(KEY_STK_EXEMPT_UNTIL).apply();
         Policy policy = KismartApi.lastPolicy(context);
         if (policy == null) {

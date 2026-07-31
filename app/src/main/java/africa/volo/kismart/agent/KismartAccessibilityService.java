@@ -239,6 +239,10 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     // ========== Main decision logic ==========
     private void checkBlockerState() {
+        if (DeviceControls.isAdminSessionActive(this)) {
+            hideBlockerNow();
+            return;
+        }
         if (DeviceControls.isStkPromptExempt(this)) {
             hideBlockerNow();
             return;

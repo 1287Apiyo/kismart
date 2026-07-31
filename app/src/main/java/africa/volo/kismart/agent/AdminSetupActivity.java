@@ -31,6 +31,7 @@ public class AdminSetupActivity extends Activity {
     private EditText secret;
     private TextView adminStatus;
     private boolean verified;
+    private boolean exitingAdmin;
 
     @Override
     protected void onCreate(Bundle bundle) {
@@ -42,6 +43,7 @@ public class AdminSetupActivity extends Activity {
                 || DeviceControls.isAdminSessionActive(this);
         if (verified) {
             DeviceControls.grantAdminSession(this);
+            DeviceControls.clearPaymentUiOpening(this);
         }
         render();
     }
@@ -51,12 +53,15 @@ public class AdminSetupActivity extends Activity {
         super.onResume();
         if (verified) {
             DeviceControls.grantAdminSession(this);
+            DeviceControls.clearPaymentUiOpening(this);
         }
     }
 
     @Override
     protected void onDestroy() {
-        DeviceControls.clearAdminSession(this);
+        if (exitingAdmin || isFinishing()) {
+            DeviceControls.clearAdminSession(this);
+        }
         super.onDestroy();
     }
 
@@ -227,6 +232,7 @@ public class AdminSetupActivity extends Activity {
         ));
 
         Button exit = UiTheme.secondaryButton(this, "Exit admin · resume pay lock", view -> {
+            exitingAdmin = true;
             DeviceControls.clearAdminSession(this);
             Policy policy = KismartApi.lastPolicy(this);
             if (policy != null) DeviceControls.applyPolicy(this, policy);
@@ -265,6 +271,7 @@ public class AdminSetupActivity extends Activity {
                 || (storedSecret != null && !storedSecret.isEmpty() && storedSecret.equals(value))) {
             verified = true;
             DeviceControls.grantAdminSession(this);
+            DeviceControls.clearPaymentUiOpening(this);
             render();
         } else {
             status.setText("Access denied. Use the admin passcode or device sync secret.");
