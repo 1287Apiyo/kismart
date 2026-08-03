@@ -94,15 +94,15 @@ final class Policy {
         boolean restrictionActive = restriction != null && restriction.optBoolean("active", false);
         String restrictionLevel = restriction == null ? "None" : restriction.optString("level", "None");
 
-        // Limit stays on while any financed balance remains (server paymentOnly.active).
+        // Limit follows the server paymentOnly flag. Future balance alone must not restrict.
         boolean paymentOnlyActive = paymentOnly != null
                 ? paymentOnly.optBoolean("active", false)
                 : restrictionActive && "Limited access".equals(restrictionLevel);
-        // Client-side safety: unpaid balance always keeps limit UX until server confirms paid.
-        if (balance > 0 && !"Full lock".equals(restrictionLevel)) {
-            paymentOnlyActive = true;
-            restrictionActive = true;
-            restrictionLevel = "Limited access";
+        // Clear stale Limited access once overdue is cleared. Remaining future balance stays Active.
+        if (arrears <= 0 && "Limited access".equals(restrictionLevel)) {
+            paymentOnlyActive = false;
+            restrictionActive = false;
+            restrictionLevel = "None";
         }
         if (balance <= 0) {
             paymentOnlyActive = false;
@@ -143,10 +143,10 @@ final class Policy {
      * until a real payment is confirmed and balance reaches zero.
      */
     boolean shouldShowLimitScreen() {
-        if (balance <= 0) return false;
-        // Full lock is a different surface; still unpaid debt blocks free use.
+        if (balance <= 0 || arrears <= 0 || !paymentOnlyActive) return false;
+        // Full lock is a different surface.
         if ("Full lock".equals(restrictionLevel) && restrictionActive) return false;
-        return true;
+        return "Limited access".equals(restrictionLevel) && restrictionActive;
     }
 
     boolean isPendingStkFailed() {

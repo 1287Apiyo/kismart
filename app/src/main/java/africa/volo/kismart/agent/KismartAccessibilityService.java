@@ -321,7 +321,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         }
 
         // UNPAID: automatic limit — non-KISMART surfaces get PAYMENT REQUIRED overlay.
-        if (DeviceControls.mustStayOnPaymentScreen(this) || policy.balance > 0) {
+        if (DeviceControls.isPaymentLimitActive(policy)) {
             if (System.currentTimeMillis() < emergencyAllowedUntil) {
                 hideBlockerNow();
                 return;

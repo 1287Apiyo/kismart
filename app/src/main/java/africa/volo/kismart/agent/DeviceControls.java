@@ -205,6 +205,11 @@ final class DeviceControls {
             return;
         }
         // Unpaid balance → ALWAYS payment-limit mode (even after a previous admin session).
+        if (!isPaymentLimitActive(policy)) {
+            restoreOwnerRestrictions(activity);
+            DeviceControls.exitLockTask(activity);
+            return;
+        }
         if (enforceMissingLimitGuard(activity, policy)) return;
         enterPaymentOnlyMode(activity, policy);
         if (!(activity instanceof MainActivity) && !(activity instanceof AdminSetupActivity)) {
@@ -236,6 +241,10 @@ final class DeviceControls {
             return;
         }
         // Unpaid: always re-apply payment-only lockdown + bring Pay UI forward.
+        if (!isPaymentLimitActive(policy)) {
+            restoreOwnerRestrictions(context);
+            return;
+        }
         if (enforceMissingLimitGuard(context, policy)) return;
         applyPaymentOnlyRestrictions(context, policy);
         bringLimitSurfaceToFront(context);
@@ -333,16 +342,16 @@ final class DeviceControls {
     }
 
     /**
-     * True while any financed balance remains unpaid.
+     * True while an overdue policy requires the payment screen.
      * Admin session does NOT disable this for general phone use — only AdminSetup is special-cased.
      */
     static boolean mustStayOnPaymentScreen(Context context) {
         Policy policy = KismartApi.lastPolicy(context);
-        return policy != null && policy.balance > 0;
+        return isPaymentLimitActive(policy);
     }
 
     static boolean mustStayOnPaymentScreen(Policy policy) {
-        return policy != null && policy.balance > 0;
+        return isPaymentLimitActive(policy);
     }
 
     /** Call after correct admin passcode — allows Admin Setup only. */
@@ -355,7 +364,7 @@ final class DeviceControls {
     static void clearAdminSession(Context context) {
         KismartApi.prefs(context).edit().remove(KEY_ADMIN_UNLOCK_UNTIL).apply();
         Policy policy = KismartApi.lastPolicy(context);
-        if (policy != null && policy.balance > 0) {
+        if (isPaymentLimitActive(policy) || isFullLockPolicy(policy)) {
             if (context instanceof Activity) {
                 applyPolicy((Activity) context, policy);
             } else {
@@ -420,7 +429,7 @@ final class DeviceControls {
             openPaymentScreenNow(context);
             return;
         }
-        if (policy.balance <= 0) {
+        if (!isPaymentLimitActive(policy)) {
             // Payment confirmed — restore normal access.
             if (context instanceof Activity) {
                 applyPolicy((Activity) context, policy);
@@ -435,11 +444,11 @@ final class DeviceControls {
         } else {
             applyPolicyFromBackground(context, policy);
         }
-        openPaymentScreenNow(context);
+        if (isPaymentLimitActive(policy)) openPaymentScreenNow(context);
         // Hard re-trap a moment later in case user tried to leave during STK.
         STK_HANDLER.postDelayed(() -> {
             Policy p = KismartApi.lastPolicy(context);
-            if (p != null && p.balance > 0 && !isStkPromptExempt(context)) {
+            if (p != null && isPaymentLimitActive(p) && !isStkPromptExempt(context)) {
                 openPaymentScreenNow(context);
                 if (context instanceof Activity) {
                     applyPolicy((Activity) context, p);

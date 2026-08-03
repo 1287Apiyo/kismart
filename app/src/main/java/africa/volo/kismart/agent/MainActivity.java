@@ -337,7 +337,7 @@ public class MainActivity extends Activity {
         LinearLayout top = new LinearLayout(this);
         top.setOrientation(LinearLayout.HORIZONTAL);
         top.setGravity(Gravity.CENTER_VERTICAL);
-        top.addView(UiTheme.sectionLabel(this, "Amount due"), new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        top.addView(UiTheme.sectionLabel(this, "Amount to pay now"), new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         accountStatusView = UiTheme.statusPill(this, "Syncing", true);
         top.addView(accountStatusView);
         panel.addView(top);
@@ -347,11 +347,11 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 21) amountView.setLetterSpacing(-0.02f);
         panel.addView(amountView);
 
-        dueView = UiTheme.text(this, "Due date · Not synced", 14, UiTheme.MUTED, false);
+        dueView = UiTheme.text(this, "Next due · Not synced", 14, UiTheme.MUTED, false);
         dueView.setPadding(0, 0, 0, dp(6));
         panel.addView(dueView);
 
-        arrearsValue = UiTheme.text(this, "Arrears · Ksh 0", 13, UiTheme.MUTED, false);
+        arrearsValue = UiTheme.text(this, "Overdue amount · None", 13, UiTheme.MUTED, false);
         panel.addView(arrearsValue);
         return panel;
     }
@@ -366,7 +366,7 @@ public class MainActivity extends Activity {
 
         customerValue = metaLine("Customer", "—");
         phoneValue = metaLine("M-Pesa phone", "—");
-        balanceValue = metaLine("Total balance", "Ksh 0");
+        balanceValue = metaLine("Remaining balance", "Ksh 0");
         panel.addView(customerValue);
         panel.addView(UiTheme.hairline(this));
         panel.addView(phoneValue);
@@ -614,22 +614,22 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     renderPolicy(policy);
                     boolean paidDown = policy.balance < paymentBalanceBefore;
-                    boolean cleared = policy.balance <= 0;
-                    if (paidDown || cleared) {
+                    boolean accessRestored = !DeviceControls.isPaymentLimitActive(policy);
+                    if (paidDown || accessRestored) {
                         paymentPending = false;
                         monitorHandler.removeCallbacks(paymentPollRunnable);
                         DeviceControls.clearStkPromptExempt(this);
-                        // Apply updated policy: only full clear (balance 0) releases the screen.
+                        // Apply updated policy: once overdue clears, the phone is released.
                         lockTaskPinned = false;
                         DeviceControls.applyPolicy(this, policy);
-                        if (!cleared) lockTaskPinned = true;
+                        if (!accessRestored) lockTaskPinned = true;
                         updatePaymentButton(policy);
                         ensurePayButtonClickable();
-                        if (cleared) {
+                        if (accessRestored) {
                             setDetail("Payment confirmed. Full access restored — you may leave this screen.");
                         } else {
                             setDetail("Payment received. Remaining balance " + formatKes(policy.balance)
-                                    + ". Stay on this screen and pay the rest to unlock.");
+                                    + ". Overdue amount still " + formatKes(policy.arrears) + ".");
                         }
                         return;
                     }
@@ -649,7 +649,7 @@ public class MainActivity extends Activity {
                         return;
                     }
                     // STK window ended and still unpaid → force limit + stay on Pay.
-                    if (!DeviceControls.isStkPromptExempt(this) && policy.balance > 0) {
+                    if (!DeviceControls.isStkPromptExempt(this) && DeviceControls.isPaymentLimitActive(policy)) {
                         lockTaskPinned = false;
                         DeviceControls.resumePaymentLimitAfterStk(this);
                         lockTaskPinned = true;
@@ -706,25 +706,29 @@ public class MainActivity extends Activity {
         latestPolicy = policy;
         if (policy == null) {
             if (amountView != null) amountView.setText("Ksh 0");
-            if (dueView != null) dueView.setText("Due date · Not synced");
+            if (dueView != null) dueView.setText("Next due · Not synced");
             setStatusPill("Syncing", true);
-            if (arrearsValue != null) arrearsValue.setText("Arrears · Ksh 0");
+            if (arrearsValue != null) arrearsValue.setText("Overdue amount · None");
             setMeta(customerValue, "Customer", "—");
             setMeta(phoneValue, "M-Pesa phone", "—");
-            setMeta(balanceValue, "Total balance", "Ksh 0");
+            setMeta(balanceValue, "Remaining balance", "Ksh 0");
             updatePaymentButton(null);
             return;
         }
         if (amountView != null) amountView.setText(formatKes(suggestedStkAmount(policy)));
-        if (dueView != null) dueView.setText("Due date · " + dueDate(policy));
+        if (dueView != null) dueView.setText("Next due · " + dueDate(policy));
         setStatusPill(accountState(policy), isRestrictedState(policy));
-        if (arrearsValue != null) arrearsValue.setText("Arrears · " + formatKes(policy.arrears));
+        if (arrearsValue != null) {
+            arrearsValue.setText(policy.arrears > 0
+                    ? "Overdue amount · " + formatKes(policy.arrears)
+                    : "Overdue amount · None");
+        }
         setMeta(customerValue, "Customer", policy.customer == null || policy.customer.trim().isEmpty() ? "Customer" : policy.customer.trim());
         String phone = policy.customerPhone == null || policy.customerPhone.trim().isEmpty()
                 ? "On file"
                 : policy.customerPhone.trim();
         setMeta(phoneValue, "M-Pesa phone", phone);
-        setMeta(balanceValue, "Total balance", formatKes(policy.balance));
+        setMeta(balanceValue, "Remaining balance", formatKes(policy.balance));
         updatePaymentButton(policy);
     }
 
@@ -749,7 +753,7 @@ public class MainActivity extends Activity {
         if (policy == null) return true;
         if (DeviceControls.isFullLockPolicy(policy)) return true;
         if (DeviceControls.isPaymentLimitActive(policy)) return true;
-        return policy.balance > 0;
+        return false;
     }
 
     private String dueDate(Policy policy) {
