@@ -26,7 +26,7 @@ import android.widget.TextView;
  */
 public class KismartAccessibilityService extends AccessibilityService {
     private static final long WATCHDOG_INTERVAL_MS = 200L;
-    private static final long WATCHDOG_LIMIT_INTERVAL_MS = 100L;
+    private static final long WATCHDOG_LIMIT_INTERVAL_MS = 50L;
     private static final long WATCHDOG_APP_INFO_INTERVAL_MS = 50L;
     private static final long EMERGENCY_ALLOW_MS = 30000L;
     /** After "Pay Now", keep overlay off until MainActivity is clearly in front. */
@@ -576,8 +576,29 @@ public class KismartAccessibilityService extends AccessibilityService {
         if (event == null || (event.getEventType() & FACTORY_RESET_INTERACTION_EVENTS) == 0) {
             return false;
         }
+        // Read the clicked/focused result node first. This avoids waiting for the full
+        // Settings accessibility tree and catches the result before navigation completes.
+        if (eventSourceMentionsFactoryReset(event)) return true;
         if (sourceMentionsFactoryResetFast()) return true;
         return isFactoryResetScreen(collectQuickScreenText());
+    }
+
+    /** Direct event-source check for the search result currently being touched/focused. */
+    private boolean eventSourceMentionsFactoryReset(AccessibilityEvent event) {
+        AccessibilityNodeInfo source = null;
+        try {
+            source = event.getSource();
+            if (source == null) return false;
+            StringBuilder value = new StringBuilder();
+            appendText(value, source.getText());
+            appendText(value, source.getContentDescription());
+            appendText(value, source.getViewIdResourceName());
+            return isFactoryResetScreen(value.toString().toLowerCase());
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (source != null) source.recycle();
+        }
     }
 
     /** Fast source-node text lookup used on focus/click events before a screen transition. */
