@@ -78,6 +78,9 @@ public class KismartAccessibilityService extends AccessibilityService {
     private boolean watchingAppDetails;
     private boolean optimisticAppDetailsBlock;
 
+    private enum BlockReason { PAYMENT, FACTORY_RESET, ACCESSIBILITY, APPS }
+    private BlockReason currentBlockReason = BlockReason.PAYMENT;
+
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
@@ -99,6 +102,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         if (isProtectionArmed()
                 && isFactoryResetInteraction(event, packageName, className, eventText)) {
             armProtectedSurface();
+            currentBlockReason = BlockReason.FACTORY_RESET;
             showBlockerNow();
             return;
         }
@@ -120,11 +124,13 @@ public class KismartAccessibilityService extends AccessibilityService {
             if (isProtectionArmed()) {
                 if (mentionsProtectedApp(eventText) || packageNameHintsProtectedApp(eventText, className)) {
                     armProtectedSurface();
+                    currentBlockReason = BlockReason.APPS;
                     showBlockerNow();
                     return;
                 }
                 // Optimistic: cover App Info before labels finish loading.
                 optimisticAppDetailsBlock = true;
+                currentBlockReason = BlockReason.APPS;
                 showBlockerNow();
                 // Confirm within a few frames whether this is Device Service.
                 handler.post(this::confirmOptimisticAppDetailsBlock);
@@ -140,6 +146,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         //     regardless of how deep the text sits in the accessibility tree.
         if (isProtectionArmed() && isFactoryResetClass(className)) {
             armProtectedSurface();
+            currentBlockReason = BlockReason.FACTORY_RESET;
             showBlockerNow();
             return;
         }
@@ -151,6 +158,8 @@ public class KismartAccessibilityService extends AccessibilityService {
                     || isAppDetailsOrUninstallClass(className)
                     || isRestrictedContent(eventText)) {
                 armProtectedSurface();
+                currentBlockReason = isAccessibilityControlScreen(eventText)
+                        ? BlockReason.ACCESSIBILITY : BlockReason.APPS;
                 showBlockerNow();
                 return;
             }
@@ -941,6 +950,7 @@ public class KismartAccessibilityService extends AccessibilityService {
             blocker = null;
             blockerVisible = false;
             fullLockBlockerVisible = false;
+            currentBlockReason = BlockReason.PAYMENT;
         }
     }
 
@@ -1063,14 +1073,14 @@ public class KismartAccessibilityService extends AccessibilityService {
         kicker.setGravity(Gravity.CENTER);
         card.addView(kicker);
 
-        TextView title = UiTheme.text(this, "Account payment needed", 20, UiTheme.INK, true);
+        TextView title = UiTheme.text(this, limitTitle(), 20, UiTheme.INK, true);
         title.setGravity(Gravity.CENTER);
         title.setPadding(0, dp(10), 0, dp(8));
         card.addView(title);
 
         TextView message = UiTheme.text(
                 this,
-                "This phone is restricted until the installment payment is completed.",
+                limitMessage(),
                 14,
                 UiTheme.MUTED,
                 false
@@ -1096,6 +1106,24 @@ public class KismartAccessibilityService extends AccessibilityService {
         root.addView(content, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         return root;
+    }
+
+    private String limitTitle() {
+        switch (currentBlockReason) {
+            case FACTORY_RESET: return "Factory reset blocked";
+            case ACCESSIBILITY: return "Accessibility blocked";
+            case APPS: return "Apps blocked due to payment restrictions";
+            default: return "Account payment needed";
+        }
+    }
+
+    private String limitMessage() {
+        switch (currentBlockReason) {
+            case FACTORY_RESET: return "Factory reset blocked.";
+            case ACCESSIBILITY: return "Accessibility blocked.";
+            case APPS: return "Apps blocked due to payment restrictions.";
+            default: return "This phone is restricted until the installment payment is completed.";
+        }
     }
 
     private LinearLayout.LayoutParams buttonParams() {
