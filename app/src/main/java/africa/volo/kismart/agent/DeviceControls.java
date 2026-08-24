@@ -62,9 +62,9 @@ final class DeviceControls {
             "ke.co.safaricom.mpesa"
     };
     
-    // Packages that must be hidden in payment-only mode
+    // Packages that must be hidden in payment-only mode. General Android Settings stays visible;
+    // dangerous Settings pages are blocked by KismartAccessibilityService.
     private static final String[] ALWAYS_HIDDEN_PACKAGES = {
-            "com.android.settings",
             "com.android.recovery",
             "com.google.android.setupwizard",
             "com.android.managedprovisioning"
@@ -652,10 +652,8 @@ final class DeviceControls {
             manager.addUserRestriction(admin, UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES);
             manager.addUserRestriction(admin, UserManager.DISALLOW_DEBUGGING_FEATURES);
             manager.addUserRestriction(admin, UserManager.DISALLOW_CREATE_WINDOWS);
-            manager.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_WIFI);
-            manager.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_BLUETOOTH);
             manager.addUserRestriction(admin, UserManager.DISALLOW_USB_FILE_TRANSFER);
-            manager.setStatusBarDisabled(admin, true);
+            manager.setStatusBarDisabled(admin, false);
             setCameraDisabledSafely(manager, admin, true);
             
             // Block factory reset at the device policy level
@@ -758,6 +756,8 @@ final class DeviceControls {
     private static String[] paymentOnlyPackages(Context context, Policy policy) {
         Set<String> allowedPackages = new LinkedHashSet<>();
         allowedPackages.add(context.getPackageName());
+        allowedPackages.add("com.android.settings");
+        allowedPackages.add("com.google.android.settings.intelligence");
         return allowedPackages.toArray(new String[0]);
     }
 

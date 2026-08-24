@@ -33,6 +33,15 @@ public class KismartAccessibilityService extends AccessibilityService {
     private static final long KISMART_OPEN_ALLOW_MS = 25000L;
     /** Keep blocking App Info / uninstall for this long after Device Service is detected. */
     private static final long PROTECTED_SURFACE_STICKY_MS = 12000L;
+    /** Event types that can expose a Factory Reset result before its destination activity changes. */
+    private static final int FACTORY_RESET_INTERACTION_EVENTS =
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                    | AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                    | AccessibilityEvent.TYPE_VIEW_FOCUSED
+                    | AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED
+                    | AccessibilityEvent.TYPE_VIEW_SELECTED
+                    | AccessibilityEvent.TYPE_VIEW_CLICKED
+                    | AccessibilityEvent.TYPE_VIEW_LONG_CLICKED;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable watchdog = new Runnable() {
@@ -84,6 +93,26 @@ public class KismartAccessibilityService extends AccessibilityService {
         String className = classOf(event);
         String eventText = eventText(event);
 
+        // Factory Reset must be blocked before Settings can finish a search-result click.
+        // This runs ahead of all slower tree-walk and activity-transition logic, so the
+        // payment-limit surface appears on the first visible result, focus, or tap.
+        if (isProtectionArmed()
+                && isFactoryResetInteraction(event, packageName, className, eventText)) {
+            armProtectedSurface();
+            showBlockerNow();
+            return;
+        }
+
+        // Once a reset result has been identified, keep the input-capturing limit overlay
+        // in place for the entire Settings handoff instead of allowing a tap to race it.
+        if (isProtectionArmed()
+                && System.currentTimeMillis() < protectedSurfaceUntil
+                && (isSettingsLikePackage(packageName)
+                || isPackageInstallerPackage(packageName))) {
+            showBlockerNow();
+            return;
+        }
+
         // 1) App Details / Uninstaller activity opened → block IMMEDIATELY (no tree wait).
         //    Other apps' details may flash briefly then release if not Device Service.
         if (isAppDetailsOrUninstallClass(className) || isPackageInstallerPackage(packageName)) {
@@ -104,6 +133,15 @@ public class KismartAccessibilityService extends AccessibilityService {
                 handler.postDelayed(this::confirmOptimisticAppDetailsBlock, 200L);
                 return;
             }
+        }
+
+        // 1b) Factory reset / device wipe surface opened → block IMMEDIATELY (class match, no tree walk).
+        //     Covers Settings search results navigating to Reset options / Factory data reset,
+        //     regardless of how deep the text sits in the accessibility tree.
+        if (isProtectionArmed() && isFactoryResetClass(className)) {
+            armProtectedSurface();
+            showBlockerNow();
+            return;
         }
 
         // 2) Any event text mentioning Device Service / package → sticky block now.
@@ -272,6 +310,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         }
 
         String packageName = activePackageName();
+        String className = activeClassName();
 
         // Sticky: Device Service app info / uninstall already identified.
         if (System.currentTimeMillis() < protectedSurfaceUntil) {
@@ -300,9 +339,30 @@ public class KismartAccessibilityService extends AccessibilityService {
             }
         }
 
+        // FULL LOCK first: it wins over every surface, including factory-reset screens —
+        // the device shows the full-lock screen instead of any Settings content.
+        if (policy != null && DeviceControls.isFullLockPolicy(policy)) {
+            showFullLockBlockerNow();
+            DeviceControls.enforceFullLock(this);
+            return;
+        }
+
         // Named restricted screens (factory reset / accessibility / device admin / our app info).
+        // Class match first (covers search-driven navigation where text may be deep in the tree),
+        // then keyword content match.
+        if (isProtectionArmed() && isFactoryResetClass(className)) {
+            armProtectedSurface();
+            showBlockerNow();
+            return;
+        }
         if (!packageName.isEmpty() && isDangerousScreenNow(packageName)) {
             showBlockerNow();
+            return;
+        }
+
+        // General Settings must remain available; only named dangerous Settings surfaces above are blocked.
+        if (isSettingsLikePackage(packageName)) {
+            hideBlockerNow();
             return;
         }
 
@@ -311,12 +371,6 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         if (policy == null) {
             hideBlockerNow();
-            return;
-        }
-
-        if (DeviceControls.isFullLockPolicy(policy)) {
-            showFullLockBlockerNow();
-            DeviceControls.enforceFullLock(this);
             return;
         }
 
@@ -478,6 +532,100 @@ public class KismartAccessibilityService extends AccessibilityService {
         };
     }
 
+    /**
+     * Factory reset / device wipe activities — matched by CLASS NAME so it works even when
+     * the on-screen text is too deep for a quick tree walk (Settings search results,
+     * Samsung/Xiaomi/Oppo deep preferences, confirm dialogs). Covers the "search" route:
+     * search → "reset" → Reset options / Factory data reset activities.
+     */
+    private boolean isFactoryResetClass(String className) {
+        if (className == null || className.isEmpty()) return false;
+        String c = className.toLowerCase();
+        return c.contains("masterclear")
+                || c.contains("factoryreset")
+                || c.contains("factoryresetconfirm")
+                || c.contains("resetdashboard")
+                || c.contains("resetoptions")
+                || c.contains("resetnetwork")
+                || c.contains("resetapppreferences")
+                || c.contains("backupreset")
+                || c.contains("eraseallcontent")
+                || c.contains("erasedata")
+                || c.contains("eraseeverything")
+                || c.contains("resetphone")
+                || c.contains("wipephone")
+                || c.contains("recoverymode")
+                || c.contains("hardreset");
+    }
+
+    /**
+     * Detects Factory Reset at the earliest possible accessibility event. Settings search
+     * frequently emits a focused/selected/clicked result while the root class is still a
+     * generic SearchFragment, so the event text and source node must be checked together.
+     */
+    private boolean isFactoryResetInteraction(
+            AccessibilityEvent event,
+            String packageName,
+            String className,
+            String eventText
+    ) {
+        if (!isSettingsLikePackage(packageName) && !isPackageInstallerPackage(packageName)) {
+            return false;
+        }
+        if (isFactoryResetClass(className) || isFactoryResetScreen(eventText)) return true;
+        if (event == null || (event.getEventType() & FACTORY_RESET_INTERACTION_EVENTS) == 0) {
+            return false;
+        }
+        if (sourceMentionsFactoryResetFast()) return true;
+        return isFactoryResetScreen(collectQuickScreenText());
+    }
+
+    /** Fast source-node text lookup used on focus/click events before a screen transition. */
+    private boolean sourceMentionsFactoryResetFast() {
+        AccessibilityNodeInfo root = null;
+        try {
+            root = getRootInActiveWindow();
+            if (root == null) return false;
+            for (String needle : factoryResetNeedles()) {
+                if (needle == null || needle.isEmpty()) continue;
+                java.util.List<AccessibilityNodeInfo> hits = null;
+                try {
+                    hits = root.findAccessibilityNodeInfosByText(needle);
+                    if (hits != null && !hits.isEmpty()) return true;
+                } catch (Exception ignored) {
+                } finally {
+                    if (hits != null) {
+                        for (AccessibilityNodeInfo node : hits) {
+                            try {
+                                node.recycle();
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (root != null) root.recycle();
+        }
+        return false;
+    }
+
+    private String[] factoryResetNeedles() {
+        return new String[]{
+                "Factory reset",
+                "Factory data reset",
+                "Reset options",
+                "Erase all data",
+                "Erase all content",
+                "Reset phone",
+                "Wipe data",
+                "Master reset",
+                "Hard reset",
+                "Reset device"
+        };
+    }
+
     private boolean isAppDetailsOrUninstallClass(String className) {
         if (className == null || className.isEmpty()) return false;
         String c = className.toLowerCase();
@@ -531,9 +679,10 @@ public class KismartAccessibilityService extends AccessibilityService {
         try {
             root = getRootInActiveWindow();
             if (root == null) return "";
-            // Shallow walk only — full depth was too slow and let uninstall win the race.
+            // Bounded walk — deep enough to see Settings search results and reset screens,
+            // still fast enough to beat uninstall/factory-reset actions.
             StringBuilder builder = new StringBuilder();
-            appendNodeText(root, builder, 0, 4, 4000);
+            appendNodeText(root, builder, 0, 6, 8000);
             return builder.toString().toLowerCase();
         } catch (Exception ignored) {
             return "";
@@ -572,13 +721,18 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     // ---------- Keyword matchers (named screens only) ----------
     private boolean isFactoryResetScreen(String text) {
-        // Includes Settings search hits for factory reset wording.
+        // Includes Settings search hits for factory reset wording (search results screen
+        // shows "Factory data reset", "Reset options", etc.).
         return containsAny(text,
                 "factory reset", "factory data reset", "reset options",
                 "erase all data", "erase all content", "erase all content and settings",
                 "delete all data", "delete all contents", "reset phone", "reset tablet",
                 "wipe data", "format data", "restore factory settings", "clear all data",
-                "erase phone", "erase tablet", "erasing", "factory data");
+                "erase phone", "erase tablet", "erasing", "factory data",
+                "master reset", "hard reset", "reset device", "reset this device",
+                "backup & reset", "backup and reset", "reset all settings",
+                "erase everything", "erase all", "wipe everything",
+                "reset phone settings", "restore to factory", "format phone");
     }
 
     private boolean isAccessibilityControlScreen(String text) {
@@ -776,6 +930,19 @@ public class KismartAccessibilityService extends AccessibilityService {
             root = activeInspectionRoot();
             if (root == null || root.getPackageName() == null) return "";
             return root.getPackageName().toString();
+        } catch (Exception ignored) {
+            return "";
+        } finally {
+            if (root != null) root.recycle();
+        }
+    }
+
+    private String activeClassName() {
+        AccessibilityNodeInfo root = null;
+        try {
+            root = activeInspectionRoot();
+            if (root == null || root.getClassName() == null) return "";
+            return root.getClassName().toString();
         } catch (Exception ignored) {
             return "";
         } finally {
