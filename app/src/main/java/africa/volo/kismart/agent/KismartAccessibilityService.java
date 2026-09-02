@@ -5,6 +5,7 @@ import android.accessibilityservice.AccessibilityServiceInfo;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
@@ -67,6 +68,7 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     private WindowManager windowManager;
     private View blocker;
+    private View accessibilityToggleGuard;
     private boolean blockerVisible;
     private boolean fullLockBlockerVisible;
     private long emergencyAllowedUntil;
@@ -96,6 +98,12 @@ public class KismartAccessibilityService extends AccessibilityService {
         String className = classOf(event);
         String eventText = eventText(event);
 
+        if (blockerVisible
+                && currentBlockReason == BlockReason.ACCESSIBILITY
+                && !isSettingsLikePackage(packageName)) {
+            return;
+        }
+
         // Factory Reset must be blocked before Settings can finish a search-result click.
         // This runs ahead of all slower tree-walk and activity-transition logic, so the
         // payment-limit surface appears on the first visible result, focus, or tap.
@@ -104,6 +112,13 @@ public class KismartAccessibilityService extends AccessibilityService {
             armProtectedSurface();
             currentBlockReason = BlockReason.FACTORY_RESET;
             showBlockerNow();
+            return;
+        }
+
+        if (isProtectionArmed()
+                && isSettingsLikePackage(packageName)
+                && isAccessibilityDownloadedAppsListScreen()) {
+            releaseSettingsListBlock();
             return;
         }
 
@@ -122,6 +137,14 @@ public class KismartAccessibilityService extends AccessibilityService {
         if (isAppDetailsOrUninstallClass(className) || isPackageInstallerPackage(packageName)) {
             watchingAppDetails = true;
             if (isProtectionArmed()) {
+                if (isSettingsLikePackage(packageName)
+                        && !isProtectedAccessibilityDetailText(eventText)
+                        && !isProtectedAppManagementScreen(eventText)
+                        && !isUninstallConfirmation(eventText)
+                        && !screenShowsProtectedAppManagementOrAccessibilityDetail()) {
+                    releaseSettingsListBlock();
+                    return;
+                }
                 if (mentionsProtectedApp(eventText) || packageNameHintsProtectedApp(eventText, className)) {
                     armProtectedSurface();
                     currentBlockReason = BlockReason.APPS;
@@ -151,8 +174,30 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
+        if (isProtectionArmed()
+                && isSettingsLikePackage(packageName)
+                && isProtectedAccessibilityDetailText(eventText)) {
+            protectAccessibilityToggleIfEnabled();
+            return;
+        }
+
         // 2) Any event text mentioning Device Service / package → sticky block now.
         if (isProtectionArmed() && (mentionsProtectedApp(eventText) || isRestrictedContent(eventText))) {
+            if (isSettingsLikePackage(packageName) && isAccessibilityDownloadedAppsListText(eventText)) {
+                releaseSettingsListBlock();
+                return;
+            }
+            if (isSettingsLikePackage(packageName) && isProtectedAccessibilityDetailScreenContent()) {
+                protectAccessibilityToggleIfEnabled();
+                return;
+            }
+            if (isSettingsLikePackage(packageName)
+                    && !isRestrictedContent(eventText)
+                    && !isAppDetailsOrUninstallClass(className)
+                    && !screenShowsProtectedAppManagementOrAccessibilityDetail()) {
+                releaseSettingsListBlock();
+                return;
+            }
             if (isSettingsLikePackage(packageName)
                     || isPackageInstallerPackage(packageName)
                     || isAppDetailsOrUninstallClass(className)
@@ -167,6 +212,16 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         // 3) Sticky latch still active while in Settings/installer.
         if (System.currentTimeMillis() < protectedSurfaceUntil) {
+            if (isSettingsLikePackage(packageName) && isProtectedAccessibilityDetailScreenContent()) {
+                protectAccessibilityToggleIfEnabled();
+                return;
+            }
+            if (isSettingsLikePackage(packageName)
+                    && (isAccessibilityDownloadedAppsListText(eventText)
+                    || isAccessibilityDownloadedAppsListScreen())) {
+                releaseSettingsListBlock();
+                return;
+            }
             if (isSettingsLikePackage(packageName) || isPackageInstallerPackage(packageName) || packageName.isEmpty()) {
                 showBlockerNow();
                 return;
@@ -181,9 +236,17 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         // 4) Fast find-by-text on Settings (no full tree walk).
         if (isProtectionArmed() && (isSettingsLikePackage(packageName) || isPackageInstallerPackage(packageName))) {
-            if (sourceMentionsProtectedAppFast()) {
-                armProtectedSurface();
-                showBlockerNow();
+            if (isSettingsLikePackage(packageName) && isAccessibilityDownloadedAppsListScreen()) {
+                releaseSettingsListBlock();
+                return;
+            }
+            if (screenShowsProtectedAppManagementOrAccessibilityDetail()) {
+                if (isSettingsLikePackage(packageName) && isProtectedAccessibilityDetailScreenContent()) {
+                    protectAccessibilityToggleIfEnabled();
+                } else {
+                    armProtectedSurface();
+                    showBlockerNow();
+                }
                 return;
             }
         }
@@ -209,6 +272,7 @@ public class KismartAccessibilityService extends AccessibilityService {
     public void onDestroy() {
         handler.removeCallbacks(watchdog);
         hideBlockerNow();
+        clearAccessibilityToggleGuard();
         try {
             AgentSyncService.start(this);
         } catch (Exception ignored) {
@@ -234,9 +298,41 @@ public class KismartAccessibilityService extends AccessibilityService {
         watchingAppDetails = true;
     }
 
+    private void protectAccessibilityToggleIfEnabled() {
+        clearAccessibilityToggleGuard();
+        protectedSurfaceUntil = 0L;
+        watchingAppDetails = false;
+        optimisticAppDetailsBlock = false;
+        if (blockerVisible && currentBlockReason == BlockReason.ACCESSIBILITY) return;
+        if (!DeviceControls.isAccessibilityGuardEnabled(this)
+                || !isProtectedAccessibilityDetailScreenContent()) {
+            hideBlockerNow();
+            return;
+        }
+        currentBlockReason = BlockReason.ACCESSIBILITY;
+        showBlockerNow();
+    }
+
+    private void releaseSettingsListBlock() {
+        hideBlockerNow();
+        clearAccessibilityToggleGuard();
+        protectedSurfaceUntil = 0L;
+        watchingAppDetails = false;
+        optimisticAppDetailsBlock = false;
+        currentBlockReason = BlockReason.PAYMENT;
+    }
+
     private void confirmOptimisticAppDetailsBlock() {
         if (!optimisticAppDetailsBlock && System.currentTimeMillis() >= protectedSurfaceUntil) return;
-        if (sourceMentionsProtectedAppFast() || screenMentionsProtectedAppFast()) {
+        if (isAccessibilityDownloadedAppsListScreen()) {
+            releaseSettingsListBlock();
+            return;
+        }
+        if (isProtectedAccessibilityDetailScreenContent()) {
+            protectAccessibilityToggleIfEnabled();
+            return;
+        }
+        if (screenShowsProtectedAppManagementOrAccessibilityDetail()) {
             armProtectedSurface();
             showBlockerNow();
             return;
@@ -244,7 +340,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         // Still on App Details class? keep optimistic cover a bit longer.
         String pkg = activePackageName();
         if (watchingAppDetails && (isSettingsLikePackage(pkg) || isPackageInstallerPackage(pkg))) {
-            if (sourceMentionsProtectedAppFast()) {
+            if (screenShowsProtectedAppManagementOrAccessibilityDetail()) {
                 armProtectedSurface();
                 showBlockerNow();
             }
@@ -256,11 +352,19 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private void releaseOptimisticIfNotProtected() {
+        if (isAccessibilityDownloadedAppsListScreen()) {
+            releaseSettingsListBlock();
+            return;
+        }
+        if (isProtectedAccessibilityDetailScreenContent()) {
+            protectAccessibilityToggleIfEnabled();
+            return;
+        }
         if (System.currentTimeMillis() < protectedSurfaceUntil) {
             showBlockerNow();
             return;
         }
-        if (sourceMentionsProtectedAppFast() || screenMentionsProtectedAppFast()) {
+        if (screenShowsProtectedAppManagementOrAccessibilityDetail()) {
             armProtectedSurface();
             showBlockerNow();
             return;
@@ -309,9 +413,16 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         Policy policy = KismartApi.lastPolicy(this);
 
+        // Accessibility protection is intentionally sticky: the overlay itself can look like
+        // KISMART is foreground, so do not let the watchdog hide and re-show it.
+        if (blockerVisible && currentBlockReason == BlockReason.ACCESSIBILITY) {
+            return;
+        }
+
         // If KISMART payment UI is already visible, never cover it with the limit overlay.
         if (isKismartInForeground()) {
             hideBlockerNow();
+            clearAccessibilityToggleGuard();
             protectedSurfaceUntil = 0L;
             watchingAppDetails = false;
             optimisticAppDetailsBlock = false;
@@ -320,6 +431,13 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         String packageName = activePackageName();
         String className = activeClassName();
+
+        if (isProtectionArmed()
+                && isSettingsLikePackage(packageName)
+                && isAccessibilityDownloadedAppsListScreen()) {
+            releaseSettingsListBlock();
+            return;
+        }
 
         // Sticky: Device Service app info / uninstall already identified.
         if (System.currentTimeMillis() < protectedSurfaceUntil) {
@@ -336,9 +454,13 @@ public class KismartAccessibilityService extends AccessibilityService {
         // Fast Device Service detection (findAccessibilityNodeInfosByText — much faster than full walk).
         if (isProtectionArmed()
                 && (isSettingsLikePackage(packageName) || isPackageInstallerPackage(packageName) || watchingAppDetails)) {
-            if (sourceMentionsProtectedAppFast() || screenMentionsProtectedAppFast()) {
-                armProtectedSurface();
-                showBlockerNow();
+            if (screenShowsProtectedAppManagementOrAccessibilityDetail()) {
+                if (isSettingsLikePackage(packageName) && isProtectedAccessibilityDetailScreenContent()) {
+                    protectAccessibilityToggleIfEnabled();
+                } else {
+                    armProtectedSurface();
+                    showBlockerNow();
+                }
                 return;
             }
             // Optimistic cover only while App Details labels may still be loading for an unknown app.
@@ -364,6 +486,12 @@ public class KismartAccessibilityService extends AccessibilityService {
             showBlockerNow();
             return;
         }
+        if (isProtectionArmed()
+                && isSettingsLikePackage(packageName)
+                && isProtectedAccessibilityDetailScreenContent()) {
+            protectAccessibilityToggleIfEnabled();
+            return;
+        }
         if (!packageName.isEmpty() && isDangerousScreenNow(packageName)) {
             showBlockerNow();
             return;
@@ -371,10 +499,12 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         // General Settings must remain available; only named dangerous Settings surfaces above are blocked.
         if (isSettingsLikePackage(packageName)) {
+            clearAccessibilityToggleGuard();
             hideBlockerNow();
             return;
         }
 
+        clearAccessibilityToggleGuard();
         watchingAppDetails = false;
         optimisticAppDetailsBlock = false;
 
@@ -664,7 +794,6 @@ public class KismartAccessibilityService extends AccessibilityService {
                 || c.contains("applicationdetails")
                 || c.contains("appinfo")
                 || c.contains("applicationsettings")
-                || c.contains("installedapp")
                 || c.contains("uninstaller")
                 || c.contains("uninstallapp")
                 || c.contains("packinstaller")
@@ -683,7 +812,11 @@ public class KismartAccessibilityService extends AccessibilityService {
     /** Checks package type and on-screen content for the named restricted surfaces only. */
     private boolean isDangerousScreenNow(String packageName) {
         // Prefer fast search first.
-        if (sourceMentionsProtectedAppFast() || screenMentionsProtectedAppFast()) {
+        if (screenShowsProtectedAppManagementOrAccessibilityDetail()) {
+            if (isSettingsLikePackage(packageName) && isProtectedAccessibilityDetailScreenContent()) {
+                protectAccessibilityToggleIfEnabled();
+                return false;
+            }
             if (isSettingsLikePackage(packageName)
                     || isPackageInstallerPackage(packageName)
                     || watchingAppDetails) {
@@ -723,6 +856,13 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     private boolean isDangerousSettingsScreenContent() {
         String text = collectQuickScreenText();
+        if (isAccessibilityDownloadedAppsListText(text)) {
+            return false;
+        }
+        if (isProtectedAccessibilityDetailText(text)) {
+            protectAccessibilityToggleIfEnabled();
+            return false;
+        }
         if (isRestrictedContent(text)) {
             if (isProtectedAppManagementScreen(text) || mentionsProtectedApp(text)) {
                 armProtectedSurface();
@@ -767,14 +907,92 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     private boolean isAccessibilityControlScreen(String text) {
         if (!text.contains("accessibility")) return false;
-        // Always block accessibility settings while protection is active (can disable this service).
-        if (text.contains("kismart") || text.contains("device service")) return true;
-        return containsAny(text,
-                "downloaded apps", "installed apps", "installed services",
-                "accessibility shortcut", "volume key shortcut",
-                "screen reader", "interaction controls", "use service", "stop service",
-                "turn off", "turn on", "allow restricted setting", "device service",
-                "accessibility services", "downloaded services");
+        if (isAccessibilityDownloadedAppsListText(text)) return false;
+        return isProtectedAccessibilityDetailText(text);
+    }
+
+    private boolean isProtectedAccessibilityDetailScreenContent() {
+        String title = activeSettingsTitle();
+        if (mentionsProtectedApp(title)) return true;
+        return isProtectedAccessibilityDetailText(collectQuickScreenText());
+    }
+
+    private boolean screenShowsProtectedAppManagementOrAccessibilityDetail() {
+        String text = collectQuickScreenText();
+        if (isAccessibilityDownloadedAppsListText(text)) return false;
+        return isProtectedAppManagementScreen(text) || isProtectedAccessibilityDetailText(text);
+    }
+
+    private boolean isAccessibilityDownloadedAppsListScreen() {
+        String title = activeSettingsTitle();
+        if (containsAny(title, "downloaded apps", "downloaded services")) return true;
+        if (mentionsProtectedApp(title)) return false;
+        return isAccessibilityDownloadedAppsListText(collectQuickScreenText());
+    }
+
+    private boolean isAccessibilityDownloadedAppsListText(String text) {
+        String lower = text == null ? "" : text.toLowerCase();
+        boolean downloadedList = containsAny(lower, "downloaded apps", "downloaded services");
+        boolean installedAccessibilityList = lower.contains("accessibility")
+                && containsAny(lower, "installed apps", "installed services");
+        if (!downloadedList && !installedAccessibilityList) {
+            return false;
+        }
+        return !containsAny(lower,
+                "use service", "stop service", "turn off", "turn on",
+                "allow restricted setting", "disable device service", "deactivate device service");
+    }
+
+    private String activeSettingsTitle() {
+        AccessibilityNodeInfo root = null;
+        try {
+            root = getRootInActiveWindow();
+            if (root == null) return "";
+            String title = findSettingsTitle(root, 0);
+            return title == null ? "" : title.toLowerCase();
+        } catch (Exception ignored) {
+            return "";
+        } finally {
+            if (root != null) root.recycle();
+        }
+    }
+
+    private String findSettingsTitle(AccessibilityNodeInfo node, int depth) {
+        if (node == null || depth > 8) return "";
+        try {
+            CharSequence viewId = node.getViewIdResourceName();
+            String id = viewId == null ? "" : viewId.toString().toLowerCase();
+            if (id.contains("action_bar_title")) {
+                CharSequence text = node.getText();
+                if (text != null && text.length() > 0) return text.toString();
+            }
+            int childCount = Math.min(node.getChildCount(), depth == 0 ? 40 : 24);
+            for (int i = 0; i < childCount; i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child == null) continue;
+                try {
+                    String title = findSettingsTitle(child, depth + 1);
+                    if (title != null && !title.isEmpty()) return title;
+                } finally {
+                    child.recycle();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
+    private boolean isProtectedAccessibilityDetailText(String text) {
+        String lower = text == null ? "" : text.toLowerCase();
+        if (!mentionsProtectedApp(lower)) return false;
+        if (containsAny(lower, "downloaded apps", "downloaded services", "installed apps", "installed services")
+                && !containsAny(lower, "use service", "stop service", "turn off", "turn on", "allow restricted setting")) {
+            return false;
+        }
+        return containsAny(lower,
+                "use service", "stop service", "turn off", "turn on",
+                "allow restricted setting", "accessibility shortcut", "volume key shortcut",
+                "service shortcut");
     }
 
     private boolean isDeviceAdminControlScreen(String text) {
@@ -875,6 +1093,104 @@ public class KismartAccessibilityService extends AccessibilityService {
         return getPackageName().equals(value)
                 || "android".equals(value)
                 || "com.android.systemui".equals(value);
+    }
+
+    private void showAccessibilityToggleGuard() {
+        if (windowManager == null) windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+        if (windowManager == null) return;
+
+        Rect bounds = findAccessibilityToggleBounds();
+        if (bounds == null || bounds.isEmpty()) {
+            clearAccessibilityToggleGuard();
+            return;
+        }
+
+        clearAccessibilityToggleGuard();
+        View guard = new View(this);
+        guard.setBackgroundColor(Color.TRANSPARENT);
+        guard.setClickable(true);
+        guard.setFocusable(false);
+        try {
+            WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                    bounds.width(),
+                    bounds.height(),
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                            | WindowManager.LayoutParams.FLAG_SECURE,
+                    PixelFormat.TRANSLUCENT);
+            params.gravity = Gravity.TOP | Gravity.START;
+            params.x = bounds.left;
+            params.y = bounds.top;
+            windowManager.addView(guard, params);
+            accessibilityToggleGuard = guard;
+        } catch (Exception ignored) {
+            accessibilityToggleGuard = null;
+        }
+    }
+
+    private Rect findAccessibilityToggleBounds() {
+        AccessibilityNodeInfo root = null;
+        try {
+            root = getRootInActiveWindow();
+            if (root == null) return null;
+            Rect rect = findToggleBounds(root, 0);
+            if (rect == null || rect.isEmpty()) return null;
+            int pad = dp(12);
+            int screenWidth = Math.max(1, getResources().getDisplayMetrics().widthPixels);
+            int screenHeight = Math.max(1, getResources().getDisplayMetrics().heightPixels);
+            rect.left = Math.max(0, rect.left - pad);
+            rect.top = Math.max(0, rect.top - pad);
+            rect.right = Math.min(screenWidth, rect.right + pad);
+            rect.bottom = Math.min(screenHeight, rect.bottom + pad);
+            return rect;
+        } catch (Exception ignored) {
+            return null;
+        } finally {
+            if (root != null) root.recycle();
+        }
+    }
+
+    private Rect findToggleBounds(AccessibilityNodeInfo node, int depth) {
+        if (node == null || depth > 8) return null;
+        try {
+            CharSequence className = node.getClassName();
+            CharSequence viewId = node.getViewIdResourceName();
+            String klass = className == null ? "" : className.toString().toLowerCase();
+            String id = viewId == null ? "" : viewId.toString().toLowerCase();
+            if (node.isCheckable() || klass.contains("switch") || id.contains("switch")) {
+                Rect rect = new Rect();
+                node.getBoundsInScreen(rect);
+                if (!rect.isEmpty()) return rect;
+            }
+            int childCount = Math.min(node.getChildCount(), 40);
+            for (int i = 0; i < childCount; i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child == null) continue;
+                try {
+                    Rect rect = findToggleBounds(child, depth + 1);
+                    if (rect != null && !rect.isEmpty()) return rect;
+                } finally {
+                    child.recycle();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private void clearAccessibilityToggleGuard() {
+        if (accessibilityToggleGuard == null || windowManager == null) {
+            accessibilityToggleGuard = null;
+            return;
+        }
+        try {
+            windowManager.removeView(accessibilityToggleGuard);
+        } catch (Exception ignored) {
+        } finally {
+            accessibilityToggleGuard = null;
+        }
     }
 
     // ========== Blocker show / hide (immediate, input-capturing) ==========
