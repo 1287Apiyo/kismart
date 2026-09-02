@@ -1674,6 +1674,9 @@ public class KismartAccessibilityService extends AccessibilityService {
         Button open = UiTheme.primaryButton(this, "Continue to pay", view -> openPaymentPrompt());
         card.addView(open, buttonParams());
 
+        Button home = UiTheme.secondaryButton(this, "Back to home", view -> openHomeFromBlocker());
+        card.addView(home, buttonParams());
+
         Button emergency = UiTheme.secondaryButton(this, "Emergency 112", view -> {
             emergencyAllowedUntil = System.currentTimeMillis() + EMERGENCY_ALLOW_MS;
             hideBlockerNow();
@@ -1712,6 +1715,22 @@ public class KismartAccessibilityService extends AccessibilityService {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(50));
         params.setMargins(0, dp(8), 0, 0);
         return params;
+    }
+
+    private void openHomeFromBlocker() {
+        protectedSurfaceUntil = 0L;
+        accessibilityBlockerStickyUntil = 0L;
+        pendingProtectedAppInfoUntil = 0L;
+        watchingAppDetails = false;
+        optimisticAppDetailsBlock = false;
+        hideBlockerNow();
+        Intent intent = new Intent(Intent.ACTION_MAIN);
+        intent.addCategory(Intent.CATEGORY_HOME);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(intent);
+        } catch (Exception ignored) {
+        }
     }
 
     private void openPaymentPrompt() {
