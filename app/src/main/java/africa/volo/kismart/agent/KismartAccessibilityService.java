@@ -43,6 +43,11 @@ public class KismartAccessibilityService extends AccessibilityService {
                     | AccessibilityEvent.TYPE_VIEW_SELECTED
                     | AccessibilityEvent.TYPE_VIEW_CLICKED
                     | AccessibilityEvent.TYPE_VIEW_LONG_CLICKED;
+    private static final int PROTECTED_APP_ENTRY_EVENTS =
+            AccessibilityEvent.TYPE_VIEW_CLICKED
+                    | AccessibilityEvent.TYPE_VIEW_FOCUSED
+                    | AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED
+                    | AccessibilityEvent.TYPE_VIEW_SELECTED;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable watchdog = new Runnable() {
@@ -78,6 +83,8 @@ public class KismartAccessibilityService extends AccessibilityService {
     private long protectedSurfaceUntil;
     /** Sticky latch: once Device Service accessibility detail is seen, keep its blocker stable. */
     private long accessibilityBlockerStickyUntil;
+    /** Short latch: the user selected our row in Settings > Apps and App Info is opening. */
+    private long pendingProtectedAppInfoUntil;
     /** True while Settings App Details / Uninstaller activity class is in the foreground. */
     private boolean watchingAppDetails;
     private boolean optimisticAppDetailsBlock;
@@ -105,6 +112,9 @@ public class KismartAccessibilityService extends AccessibilityService {
                 && !isSettingsLikePackage(packageName)) {
             return;
         }
+        if (blockerVisible && currentBlockReason == BlockReason.APPS) {
+            return;
+        }
 
         // Factory Reset must be blocked before Settings can finish a search-result click.
         // This runs ahead of all slower tree-walk and activity-transition logic, so the
@@ -130,13 +140,7 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
-        if (isProtectionArmed()
-                && isSettingsAppsSurfaceShowingProtectedApp(packageName, eventText)) {
-            currentBlockReason = BlockReason.APPS;
-            armProtectedSurface();
-            showBlockerNow();
-            return;
-        }
+        rememberProtectedAppEntry(event, packageName, eventText);
 
         if (isProtectionArmed()
                 && isSettingsLikePackage(packageName)
@@ -144,6 +148,12 @@ public class KismartAccessibilityService extends AccessibilityService {
             currentBlockReason = BlockReason.APPS;
             armProtectedSurface();
             showBlockerNow();
+            return;
+        }
+
+        if (isProtectionArmed()
+                && isSettingsAppsListScreen(packageName)) {
+            releaseSettingsAppsListBlock();
             return;
         }
 
@@ -373,6 +383,14 @@ public class KismartAccessibilityService extends AccessibilityService {
         currentBlockReason = BlockReason.PAYMENT;
     }
 
+    private void releaseSettingsAppsListBlock() {
+        hideBlockerNow();
+        protectedSurfaceUntil = 0L;
+        watchingAppDetails = false;
+        optimisticAppDetailsBlock = false;
+        currentBlockReason = BlockReason.PAYMENT;
+    }
+
     private boolean shouldKeepAccessibilityBlocker(String packageName) {
         if (!isProtectionArmed()) return false;
         if (!isSettingsLikePackage(packageName)) return false;
@@ -502,9 +520,11 @@ public class KismartAccessibilityService extends AccessibilityService {
 
         Policy policy = KismartApi.lastPolicy(this);
 
-        // Accessibility protection is intentionally sticky: the overlay itself can look like
-        // KISMART is foreground, so do not let the watchdog hide and re-show it.
-        if (blockerVisible && currentBlockReason == BlockReason.ACCESSIBILITY) {
+        // Protected Settings overlays are intentionally sticky: the overlay itself can
+        // look like KISMART is foreground, so do not let the watchdog hide and re-show it.
+        if (blockerVisible
+                && (currentBlockReason == BlockReason.ACCESSIBILITY
+                || currentBlockReason == BlockReason.APPS)) {
             return;
         }
 
@@ -529,10 +549,17 @@ public class KismartAccessibilityService extends AccessibilityService {
         }
 
         if (isProtectionArmed()
-                && isSettingsAppsSurfaceShowingProtectedApp(packageName, "")) {
+                && isSettingsLikePackage(packageName)
+                && isProtectedAppInfoScreen(className)) {
             currentBlockReason = BlockReason.APPS;
             armProtectedSurface();
             showBlockerNow();
+            return;
+        }
+
+        if (isProtectionArmed()
+                && isSettingsAppsListScreen(packageName)) {
+            releaseSettingsAppsListBlock();
             return;
         }
 
@@ -1055,17 +1082,56 @@ public class KismartAccessibilityService extends AccessibilityService {
         boolean appInfoSurface = isAppDetailsOrUninstallClass(className)
                 || isAppManagementControlText(text);
         if (!appInfoSurface) return false;
-        return mentionsProtectedApp(activeSettingsTitle())
+        return System.currentTimeMillis() < pendingProtectedAppInfoUntil
+                || mentionsProtectedApp(activeSettingsTitle())
                 || mentionsProtectedApp(activeAppHeaderText())
                 || mentionsProtectedApp(text);
     }
 
-    private boolean isSettingsAppsSurfaceShowingProtectedApp(String packageName, String eventText) {
+    private void rememberProtectedAppEntry(
+            AccessibilityEvent event,
+            String packageName,
+            String eventText
+    ) {
+        if (event == null || !isSettingsLikePackage(packageName)) return;
+        if ((event.getEventType() & PROTECTED_APP_ENTRY_EVENTS) == 0) return;
+        if (isAccessibilityDownloadedAppsListScreen()) return;
+        if (isProtectedAccessibilityDetailScreenContent()) return;
+        if (!mentionsProtectedApp(eventText) && !eventSourceMentionsProtectedApp(event)) return;
+        pendingProtectedAppInfoUntil = System.currentTimeMillis() + 5000L;
+    }
+
+    private boolean eventSourceMentionsProtectedApp(AccessibilityEvent event) {
+        AccessibilityNodeInfo source = null;
+        try {
+            source = event.getSource();
+            if (source == null) return false;
+            StringBuilder value = new StringBuilder();
+            appendText(value, source.getText());
+            appendText(value, source.getContentDescription());
+            appendText(value, source.getViewIdResourceName());
+            return mentionsProtectedApp(value.toString());
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (source != null) source.recycle();
+        }
+    }
+
+    private boolean isSettingsAppsListScreen(String packageName) {
         if (!isSettingsLikePackage(packageName)) return false;
         if (isAccessibilityDownloadedAppsListScreen()) return false;
         if (isProtectedAccessibilityDetailScreenContent()) return false;
-        if (mentionsProtectedApp(eventText)) return true;
-        return screenMentionsProtectedAppFast();
+        String text = collectQuickScreenText();
+        if (isAppManagementControlText(text)) return false;
+        String title = activeSettingsTitle();
+        if (mentionsProtectedApp(title)) return false;
+        if (containsAny(title, "apps", "all apps", "see all apps",
+                "installed apps", "app management", "manage apps", "applications")) {
+            return true;
+        }
+        return containsAny(text, "all apps", "see all apps", "installed apps", "app management")
+                && screenMentionsProtectedAppFast();
     }
 
     private boolean isAccessibilityDownloadedAppsListScreen() {
