@@ -76,6 +76,8 @@ public class KismartAccessibilityService extends AccessibilityService {
     private long lastPaymentHandoffOpenAt;
     /** Sticky latch: once Device Service app info is seen, keep overlay until user leaves. */
     private long protectedSurfaceUntil;
+    /** Sticky latch: once Device Service accessibility detail is seen, keep its blocker stable. */
+    private long accessibilityBlockerStickyUntil;
     /** True while Settings App Details / Uninstaller activity class is in the foreground. */
     private boolean watchingAppDetails;
     private boolean optimisticAppDetailsBlock;
@@ -111,6 +113,12 @@ public class KismartAccessibilityService extends AccessibilityService {
                 && isFactoryResetInteraction(event, packageName, className, eventText)) {
             armProtectedSurface();
             currentBlockReason = BlockReason.FACTORY_RESET;
+            showBlockerNow();
+            return;
+        }
+
+        if (shouldKeepAccessibilityBlocker(packageName)) {
+            currentBlockReason = BlockReason.ACCESSIBILITY;
             showBlockerNow();
             return;
         }
@@ -303,12 +311,13 @@ public class KismartAccessibilityService extends AccessibilityService {
         protectedSurfaceUntil = 0L;
         watchingAppDetails = false;
         optimisticAppDetailsBlock = false;
-        if (blockerVisible && currentBlockReason == BlockReason.ACCESSIBILITY) return;
         if (!DeviceControls.isAccessibilityGuardEnabled(this)
                 || !isProtectedAccessibilityDetailScreenContent()) {
             hideBlockerNow();
             return;
         }
+        accessibilityBlockerStickyUntil = System.currentTimeMillis() + PROTECTED_SURFACE_STICKY_MS;
+        if (blockerVisible && currentBlockReason == BlockReason.ACCESSIBILITY) return;
         currentBlockReason = BlockReason.ACCESSIBILITY;
         showBlockerNow();
     }
@@ -317,9 +326,17 @@ public class KismartAccessibilityService extends AccessibilityService {
         hideBlockerNow();
         clearAccessibilityToggleGuard();
         protectedSurfaceUntil = 0L;
+        accessibilityBlockerStickyUntil = 0L;
         watchingAppDetails = false;
         optimisticAppDetailsBlock = false;
         currentBlockReason = BlockReason.PAYMENT;
+    }
+
+    private boolean shouldKeepAccessibilityBlocker(String packageName) {
+        if (!isProtectionArmed()) return false;
+        if (!isSettingsLikePackage(packageName)) return false;
+        if (System.currentTimeMillis() >= accessibilityBlockerStickyUntil) return false;
+        return !isAccessibilityDownloadedAppsListScreen();
     }
 
     private void confirmOptimisticAppDetailsBlock() {
@@ -439,6 +456,12 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
+        if (shouldKeepAccessibilityBlocker(packageName)) {
+            currentBlockReason = BlockReason.ACCESSIBILITY;
+            showBlockerNow();
+            return;
+        }
+
         // Sticky: Device Service app info / uninstall already identified.
         if (System.currentTimeMillis() < protectedSurfaceUntil) {
             if (packageName.isEmpty()
@@ -501,10 +524,12 @@ public class KismartAccessibilityService extends AccessibilityService {
         if (isSettingsLikePackage(packageName)) {
             clearAccessibilityToggleGuard();
             hideBlockerNow();
+            accessibilityBlockerStickyUntil = 0L;
             return;
         }
 
         clearAccessibilityToggleGuard();
+        accessibilityBlockerStickyUntil = 0L;
         watchingAppDetails = false;
         optimisticAppDetailsBlock = false;
 
