@@ -130,6 +130,23 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
+        if (isProtectionArmed()
+                && isSettingsAppsSurfaceShowingProtectedApp(packageName, eventText)) {
+            currentBlockReason = BlockReason.APPS;
+            armProtectedSurface();
+            showBlockerNow();
+            return;
+        }
+
+        if (isProtectionArmed()
+                && isSettingsLikePackage(packageName)
+                && isProtectedAppInfoScreen(className)) {
+            currentBlockReason = BlockReason.APPS;
+            armProtectedSurface();
+            showBlockerNow();
+            return;
+        }
+
         // Once a reset result has been identified, keep the input-capturing limit overlay
         // in place for the entire Settings handoff instead of allowing a tap to race it.
         if (isProtectionArmed()
@@ -146,6 +163,14 @@ public class KismartAccessibilityService extends AccessibilityService {
             watchingAppDetails = true;
             if (isProtectionArmed()) {
                 if (isSettingsLikePackage(packageName)
+                        && isAppDetailsOrUninstallClass(className)
+                        && isProtectedAppInfoScreen(className)) {
+                    armProtectedSurface();
+                    currentBlockReason = BlockReason.APPS;
+                    showBlockerNow();
+                    return;
+                }
+                if (isSettingsLikePackage(packageName)
                         && !isProtectedAccessibilityDetailText(eventText)
                         && !isProtectedAppManagementScreen(eventText)
                         && !isUninstallConfirmation(eventText)
@@ -153,21 +178,19 @@ public class KismartAccessibilityService extends AccessibilityService {
                     releaseSettingsListBlock();
                     return;
                 }
-                if (mentionsProtectedApp(eventText) || packageNameHintsProtectedApp(eventText, className)) {
+                if (isProtectedAppManagementScreen(eventText)
+                        || (mentionsProtectedApp(eventText) && isUninstallConfirmation(eventText))
+                        || screenShowsProtectedAppManagementScreen()) {
                     armProtectedSurface();
                     currentBlockReason = BlockReason.APPS;
                     showBlockerNow();
                     return;
                 }
-                // Optimistic: cover App Info before labels finish loading.
-                optimisticAppDetailsBlock = true;
-                currentBlockReason = BlockReason.APPS;
-                showBlockerNow();
-                // Confirm within a few frames whether this is Device Service.
-                handler.post(this::confirmOptimisticAppDetailsBlock);
-                handler.postDelayed(this::confirmOptimisticAppDetailsBlock, 40L);
-                handler.postDelayed(this::confirmOptimisticAppDetailsBlock, 100L);
-                handler.postDelayed(this::confirmOptimisticAppDetailsBlock, 200L);
+                // App Info pages can load their labels after the activity appears. Re-check
+                // shortly, but do not show the blocker unless this becomes Device Service.
+                handler.post(this::confirmWatchedAppDetailsBlock);
+                handler.postDelayed(this::confirmWatchedAppDetailsBlock, 80L);
+                handler.postDelayed(this::confirmWatchedAppDetailsBlock, 180L);
                 return;
             }
         }
@@ -210,10 +233,25 @@ public class KismartAccessibilityService extends AccessibilityService {
                     || isPackageInstallerPackage(packageName)
                     || isAppDetailsOrUninstallClass(className)
                     || isRestrictedContent(eventText)) {
-                armProtectedSurface();
-                currentBlockReason = isAccessibilityControlScreen(eventText)
-                        ? BlockReason.ACCESSIBILITY : BlockReason.APPS;
-                showBlockerNow();
+                if (isAccessibilityControlScreen(eventText)) {
+                    currentBlockReason = BlockReason.ACCESSIBILITY;
+                    showBlockerNow();
+                    return;
+                }
+                if (isFactoryResetScreen(eventText)
+                        || isDeviceAdminControlScreen(eventText)
+                        || isProtectedAppManagementScreen(eventText)
+                        || screenShowsProtectedAppManagementScreen()
+                        || (mentionsProtectedApp(eventText) && isUninstallConfirmation(eventText))) {
+                    armProtectedSurface();
+                    currentBlockReason = BlockReason.APPS;
+                    showBlockerNow();
+                    return;
+                }
+                if (isSettingsLikePackage(packageName)) {
+                    releaseSettingsListBlock();
+                    return;
+                }
                 return;
             }
         }
@@ -251,9 +289,12 @@ public class KismartAccessibilityService extends AccessibilityService {
             if (screenShowsProtectedAppManagementOrAccessibilityDetail()) {
                 if (isSettingsLikePackage(packageName) && isProtectedAccessibilityDetailScreenContent()) {
                     protectAccessibilityToggleIfEnabled();
-                } else {
+                } else if (screenShowsProtectedAppManagementScreen()) {
+                    currentBlockReason = BlockReason.APPS;
                     armProtectedSurface();
                     showBlockerNow();
+                } else {
+                    releaseSettingsListBlock();
                 }
                 return;
             }
@@ -349,16 +390,18 @@ public class KismartAccessibilityService extends AccessibilityService {
             protectAccessibilityToggleIfEnabled();
             return;
         }
-        if (screenShowsProtectedAppManagementOrAccessibilityDetail()) {
+        if (screenShowsProtectedAppManagementScreen()) {
             armProtectedSurface();
+            currentBlockReason = BlockReason.APPS;
             showBlockerNow();
             return;
         }
         // Still on App Details class? keep optimistic cover a bit longer.
         String pkg = activePackageName();
         if (watchingAppDetails && (isSettingsLikePackage(pkg) || isPackageInstallerPackage(pkg))) {
-            if (screenShowsProtectedAppManagementOrAccessibilityDetail()) {
+            if (screenShowsProtectedAppManagementScreen()) {
                 armProtectedSurface();
+                currentBlockReason = BlockReason.APPS;
                 showBlockerNow();
             }
             // Do not hide yet — labels may still be loading. A later tick will hide if not ours.
@@ -366,6 +409,34 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
         releaseOptimisticIfNotProtected();
+    }
+
+    private void confirmWatchedAppDetailsBlock() {
+        if (!watchingAppDetails) return;
+        if (isAccessibilityDownloadedAppsListScreen()) {
+            releaseSettingsListBlock();
+            return;
+        }
+        if (isProtectedAppInfoScreen(activeClassName())) {
+            currentBlockReason = BlockReason.APPS;
+            armProtectedSurface();
+            showBlockerNow();
+            return;
+        }
+        if (isProtectedAccessibilityDetailScreenContent()) {
+            protectAccessibilityToggleIfEnabled();
+            return;
+        }
+        if (screenShowsProtectedAppManagementScreen()) {
+            currentBlockReason = BlockReason.APPS;
+            armProtectedSurface();
+            showBlockerNow();
+            return;
+        }
+        String pkg = activePackageName();
+        if (!isSettingsLikePackage(pkg) && !isPackageInstallerPackage(pkg)) {
+            watchingAppDetails = false;
+        }
     }
 
     private void releaseOptimisticIfNotProtected() {
@@ -381,8 +452,9 @@ public class KismartAccessibilityService extends AccessibilityService {
             showBlockerNow();
             return;
         }
-        if (screenShowsProtectedAppManagementOrAccessibilityDetail()) {
+        if (screenShowsProtectedAppManagementScreen()) {
             armProtectedSurface();
+            currentBlockReason = BlockReason.APPS;
             showBlockerNow();
             return;
         }
@@ -456,6 +528,14 @@ public class KismartAccessibilityService extends AccessibilityService {
             return;
         }
 
+        if (isProtectionArmed()
+                && isSettingsAppsSurfaceShowingProtectedApp(packageName, "")) {
+            currentBlockReason = BlockReason.APPS;
+            armProtectedSurface();
+            showBlockerNow();
+            return;
+        }
+
         if (shouldKeepAccessibilityBlocker(packageName)) {
             currentBlockReason = BlockReason.ACCESSIBILITY;
             showBlockerNow();
@@ -477,12 +557,23 @@ public class KismartAccessibilityService extends AccessibilityService {
         // Fast Device Service detection (findAccessibilityNodeInfosByText — much faster than full walk).
         if (isProtectionArmed()
                 && (isSettingsLikePackage(packageName) || isPackageInstallerPackage(packageName) || watchingAppDetails)) {
+            if (isSettingsLikePackage(packageName)
+                    && isAppDetailsOrUninstallClass(className)
+                    && isProtectedAppInfoScreen(className)) {
+                currentBlockReason = BlockReason.APPS;
+                armProtectedSurface();
+                showBlockerNow();
+                return;
+            }
             if (screenShowsProtectedAppManagementOrAccessibilityDetail()) {
                 if (isSettingsLikePackage(packageName) && isProtectedAccessibilityDetailScreenContent()) {
                     protectAccessibilityToggleIfEnabled();
-                } else {
+                } else if (screenShowsProtectedAppManagementScreen()) {
+                    currentBlockReason = BlockReason.APPS;
                     armProtectedSurface();
                     showBlockerNow();
+                } else {
+                    releaseSettingsListBlock();
                 }
                 return;
             }
@@ -824,14 +915,9 @@ public class KismartAccessibilityService extends AccessibilityService {
                 || c.contains("packinstaller")
                 || c.contains("packageinstaller")
                 || c.contains("applicationinfo")
-                || c.contains("manageapplications")
                 || c.contains("installedappdetails top")
                 || c.contains("spacemanager")
                 || c.contains("storagesettings");
-    }
-
-    private boolean packageNameHintsProtectedApp(String eventText, String className) {
-        return mentionsProtectedApp(eventText) || mentionsProtectedApp(className);
     }
 
     /** Checks package type and on-screen content for the named restricted surfaces only. */
@@ -842,16 +928,18 @@ public class KismartAccessibilityService extends AccessibilityService {
                 protectAccessibilityToggleIfEnabled();
                 return false;
             }
-            if (isSettingsLikePackage(packageName)
+            if (screenShowsProtectedAppManagementScreen()
+                    && (isSettingsLikePackage(packageName)
                     || isPackageInstallerPackage(packageName)
-                    || watchingAppDetails) {
+                    || watchingAppDetails)) {
                 armProtectedSurface();
                 return true;
             }
         }
         if (isPackageInstallerPackage(packageName)) {
             String text = collectQuickScreenText();
-            if (mentionsProtectedApp(text) || isUninstallConfirmation(text)) {
+            if (isProtectedAppManagementScreen(text)
+                    || (mentionsProtectedApp(text) && isUninstallConfirmation(text))) {
                 armProtectedSurface();
                 return true;
             }
@@ -889,7 +977,7 @@ public class KismartAccessibilityService extends AccessibilityService {
             return false;
         }
         if (isRestrictedContent(text)) {
-            if (isProtectedAppManagementScreen(text) || mentionsProtectedApp(text)) {
+            if (isProtectedAppManagementScreen(text)) {
                 armProtectedSurface();
             }
             return true;
@@ -899,7 +987,8 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     private boolean isDangerousRemovalSurfaceContent() {
         String text = collectQuickScreenText();
-        if (isProtectedAppManagementScreen(text) || isUninstallConfirmation(text)) {
+        if (isProtectedAppManagementScreen(text)
+                || (mentionsProtectedApp(text) && isUninstallConfirmation(text))) {
             armProtectedSurface();
             return true;
         }
@@ -937,15 +1026,46 @@ public class KismartAccessibilityService extends AccessibilityService {
     }
 
     private boolean isProtectedAccessibilityDetailScreenContent() {
+        String text = collectQuickScreenText();
         String title = activeSettingsTitle();
-        if (mentionsProtectedApp(title)) return true;
-        return isProtectedAccessibilityDetailText(collectQuickScreenText());
+        if (mentionsProtectedApp(title)) {
+            if (isAppManagementControlText(text) && !isProtectedAccessibilityDetailText(text)) {
+                return false;
+            }
+            return true;
+        }
+        return isProtectedAccessibilityDetailText(text);
     }
 
     private boolean screenShowsProtectedAppManagementOrAccessibilityDetail() {
         String text = collectQuickScreenText();
         if (isAccessibilityDownloadedAppsListText(text)) return false;
         return isProtectedAppManagementScreen(text) || isProtectedAccessibilityDetailText(text);
+    }
+
+    private boolean screenShowsProtectedAppManagementScreen() {
+        String text = collectQuickScreenText();
+        if (isAccessibilityDownloadedAppsListText(text)) return false;
+        return isProtectedAppManagementScreen(text);
+    }
+
+    private boolean isProtectedAppInfoScreen(String className) {
+        String text = collectQuickScreenText();
+        if (isAccessibilityDownloadedAppsListText(text)) return false;
+        boolean appInfoSurface = isAppDetailsOrUninstallClass(className)
+                || isAppManagementControlText(text);
+        if (!appInfoSurface) return false;
+        return mentionsProtectedApp(activeSettingsTitle())
+                || mentionsProtectedApp(activeAppHeaderText())
+                || mentionsProtectedApp(text);
+    }
+
+    private boolean isSettingsAppsSurfaceShowingProtectedApp(String packageName, String eventText) {
+        if (!isSettingsLikePackage(packageName)) return false;
+        if (isAccessibilityDownloadedAppsListScreen()) return false;
+        if (isProtectedAccessibilityDetailScreenContent()) return false;
+        if (mentionsProtectedApp(eventText)) return true;
+        return screenMentionsProtectedAppFast();
     }
 
     private boolean isAccessibilityDownloadedAppsListScreen() {
@@ -1007,6 +1127,48 @@ public class KismartAccessibilityService extends AccessibilityService {
         return "";
     }
 
+    private String activeAppHeaderText() {
+        AccessibilityNodeInfo root = null;
+        try {
+            root = getRootInActiveWindow();
+            if (root == null) return "";
+            String title = findAppHeaderText(root, 0);
+            return title == null ? "" : title.toLowerCase();
+        } catch (Exception ignored) {
+            return "";
+        } finally {
+            if (root != null) root.recycle();
+        }
+    }
+
+    private String findAppHeaderText(AccessibilityNodeInfo node, int depth) {
+        if (node == null || depth > 8) return "";
+        try {
+            CharSequence viewId = node.getViewIdResourceName();
+            String id = viewId == null ? "" : viewId.toString().toLowerCase();
+            if (id.contains("entity_header_title")
+                    || id.contains("app_header_title")
+                    || id.contains("app_snippet_title")
+                    || id.contains("header_title")) {
+                CharSequence text = node.getText();
+                if (text != null && text.length() > 0) return text.toString();
+            }
+            int childCount = Math.min(node.getChildCount(), depth == 0 ? 40 : 24);
+            for (int i = 0; i < childCount; i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child == null) continue;
+                try {
+                    String title = findAppHeaderText(child, depth + 1);
+                    if (title != null && !title.isEmpty()) return title;
+                } finally {
+                    child.recycle();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
     private boolean isProtectedAccessibilityDetailText(String text) {
         String lower = text == null ? "" : text.toLowerCase();
         if (!mentionsProtectedApp(lower)) return false;
@@ -1028,13 +1190,24 @@ public class KismartAccessibilityService extends AccessibilityService {
 
     private boolean isProtectedAppManagementScreen(String text) {
         String lower = text == null ? "" : text.toLowerCase();
-        if (!mentionsProtectedApp(lower)) return false;
+        boolean protectedTitle = mentionsProtectedApp(activeSettingsTitle());
+        if (!protectedTitle && !mentionsProtectedApp(lower)) return false;
+        boolean strongAppDetailAction = isAppManagementControlText(lower);
+        boolean protectedDetailPage = protectedTitle && containsAny(lower,
+                "permissions", "storage", "storage & cache", "battery",
+                "mobile data", "screen time", "notifications", "default",
+                "app installed from");
+        return strongAppDetailAction || protectedDetailPage;
+    }
+
+    private boolean isAppManagementControlText(String text) {
+        String lower = text == null ? "" : text.toLowerCase();
         return containsAny(lower,
                 "uninstall", "uninstall app", "delete", "delete app",
                 "remove app", "remove from device", "remove this app",
-                "app info", "application info", "app details", "manage app", "manage apps",
+                "app info", "application info", "app details",
                 "disable", "deactivate", "device admin", "device administrator",
-                "force stop", "clear data", "clear cache", "storage", "trash",
+                "force stop", "clear data", "clear cache", "clear storage", "storage", "trash",
                 "drag here to uninstall", "open by default", "set as default",
                 "permissions", "force stop");
     }
@@ -1052,6 +1225,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         String packageName = getPackageName().toLowerCase();
         return lower.contains("kismart")
                 || lower.contains("device service")
+                || lower.contains("device control")
                 || lower.contains(appLabel)
                 || lower.contains(packageName)
                 || lower.contains("africa.volo.kismart");
