@@ -64,7 +64,10 @@ public class KismartAccessibilityService extends AccessibilityService {
                 delay = WATCHDOG_APP_INFO_INTERVAL_MS;
             } else if (DeviceControls.mustStayOnPaymentScreen(KismartAccessibilityService.this)
                     || DeviceControls.isPaymentLimitActive(KismartApi.lastPolicy(KismartAccessibilityService.this))
-                    || DeviceControls.isFullLockPolicy(KismartApi.lastPolicy(KismartAccessibilityService.this))) {
+                    || DeviceControls.isFullLockPolicy(KismartApi.lastPolicy(KismartAccessibilityService.this))
+                    || isAccessibilityArmed()) {
+                // Run at fast interval when accessibility is armed so factory reset is caught
+                // immediately even when no payment policy is currently active.
                 delay = WATCHDOG_LIMIT_INTERVAL_MS;
             }
             handler.postDelayed(this, delay);
@@ -119,7 +122,8 @@ public class KismartAccessibilityService extends AccessibilityService {
         // Factory Reset must be blocked before Settings can finish a search-result click.
         // This runs ahead of all slower tree-walk and activity-transition logic, so the
         // payment-limit surface appears on the first visible result, focus, or tap.
-        if (isProtectionArmed()
+        // Blocked whenever our accessibility service is enabled OR protection is otherwise armed.
+        if ((isProtectionArmed() || isAccessibilityArmed())
                 && isFactoryResetInteraction(event, packageName, className, eventText)) {
             armProtectedSurface();
             currentBlockReason = BlockReason.FACTORY_RESET;
@@ -208,7 +212,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         // 1b) Factory reset / device wipe surface opened → block IMMEDIATELY (class match, no tree walk).
         //     Covers Settings search results navigating to Reset options / Factory data reset,
         //     regardless of how deep the text sits in the accessibility tree.
-        if (isProtectionArmed() && isFactoryResetClass(className)) {
+        if ((isProtectionArmed() || isAccessibilityArmed()) && isFactoryResetClass(className)) {
             armProtectedSurface();
             currentBlockReason = BlockReason.FACTORY_RESET;
             showBlockerNow();
@@ -495,6 +499,14 @@ public class KismartAccessibilityService extends AccessibilityService {
         return imei != null && !imei.trim().isEmpty();
     }
 
+    /**
+     * True whenever our accessibility service is enabled on this device.
+     * Factory reset is always blocked while this returns true, regardless of policy state.
+     */
+    private boolean isAccessibilityArmed() {
+        return DeviceControls.isAccessibilityGuardEnabled(this);
+    }
+
     // ========== Main decision logic ==========
     private void checkBlockerState() {
         if (DeviceControls.isAdminSessionActive(this)) {
@@ -622,7 +634,7 @@ public class KismartAccessibilityService extends AccessibilityService {
         // Named restricted screens (factory reset / accessibility / device admin / our app info).
         // Class match first (covers search-driven navigation where text may be deep in the tree),
         // then keyword content match.
-        if (isProtectionArmed() && isFactoryResetClass(className)) {
+        if ((isProtectionArmed() || isAccessibilityArmed()) && isFactoryResetClass(className)) {
             armProtectedSurface();
             showBlockerNow();
             return;
